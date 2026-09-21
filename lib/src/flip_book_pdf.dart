@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import 'package:flip_book/src/flip_book_controller.dart';
 import 'package:flip_book/src/flip_book_widget.dart';
+import 'package:flip_book/src/flip_settings.dart';
 
 /// A [FlipBookWidget] that renders pages from a PDF document using `pdfrx`.
 ///
@@ -21,7 +24,10 @@ class FlipBookPdf extends StatefulWidget {
     required this.source,
     this.controller,
     this.initialPage = 0,
-    this.flipDuration = const Duration(milliseconds: 600),
+    this.flip = const FlipSettings(),
+    @Deprecated('Use flip: FlipSettings(duration: ...). Removed in 0.3.0.')
+    this.flipDuration,
+    @Deprecated('No longer used; a drag anywhere flips. Removed in 0.3.0.')
     this.hotZoneSize = 60.0,
     this.showPageIndicator = true,
     this.backgroundColor = const Color(0xFFE8E4DC),
@@ -29,16 +35,17 @@ class FlipBookPdf extends StatefulWidget {
     this.pageBackColor = const Color(0xFFF0EEE8),
     this.loadingBuilder,
     this.errorBuilder,
+    this.onDocumentLoaded,
   });
 
   /// The PDF document source — file, asset, network, or data bytes.
   ///
-  /// Construct with:
+  /// These are separate classes, not named constructors:
   /// ```dart
-  /// PdfDocumentRef.file('/path/to/file.pdf')
-  /// PdfDocumentRef.asset('assets/document.pdf')
-  /// PdfDocumentRef.uri(Uri.parse('https://example.com/doc.pdf'))
-  /// PdfDocumentRef.data(bytes)
+  /// PdfDocumentRefFile('/path/to/file.pdf')
+  /// PdfDocumentRefAsset('assets/document.pdf')
+  /// PdfDocumentRefUri(Uri.parse('https://example.com/doc.pdf'))
+  /// PdfDocumentRefData(bytes, sourceName: 'doc.pdf')
   /// ```
   final PdfDocumentRef source;
 
@@ -48,10 +55,17 @@ class FlipBookPdf extends StatefulWidget {
   /// The page displayed on first build (zero-based).
   final int initialPage;
 
+  /// Page-flip animation configuration. See [FlipSettings].
+  final FlipSettings flip;
+
   /// Duration of a single page-flip animation.
-  final Duration flipDuration;
+  @Deprecated('Use flip: FlipSettings(duration: ...). Removed in 0.3.0.')
+  final Duration? flipDuration;
 
   /// Size in logical pixels of each hot-corner trigger zone.
+  ///
+  /// Unused: a horizontal drag anywhere on the book drives a flip.
+  @Deprecated('No longer used; a drag anywhere flips. Removed in 0.3.0.')
   final double hotZoneSize;
 
   /// Whether to show the page number indicator at the bottom.
@@ -72,6 +86,12 @@ class FlipBookPdf extends StatefulWidget {
   /// Optional builder shown when the PDF fails to load.
   final Widget Function(BuildContext, Object error)? errorBuilder;
 
+  /// Called with the page count once the document has loaded.
+  ///
+  /// The flip viewer otherwise reports nothing back about the document, which
+  /// leaves hosts such as [FlipBookReader] unable to show a page counter.
+  final void Function(int pageCount)? onDocumentLoaded;
+
   @override
   State<FlipBookPdf> createState() => _FlipBookPdfState();
 }
@@ -80,30 +100,54 @@ class _FlipBookPdfState extends State<FlipBookPdf> {
   PdfDocument? _document;
   Object? _error;
 
+  /// Incremented per load so a slow load for an old source cannot overwrite
+  /// the result of a newer one.
+  int _loadGeneration = 0;
+
   @override
   void initState() {
     super.initState();
-    _loadDocument();
+    unawaited(_loadDocument());
   }
 
   @override
   void didUpdateWidget(covariant FlipBookPdf old) {
     super.didUpdateWidget(old);
     if (old.source != widget.source) {
-      _loadDocument();
+      unawaited(_loadDocument());
     }
   }
 
+  @override
+  void dispose() {
+    // PdfDocumentRef.loadDocument() opens a fresh, caller-owned document (the
+    // shared/auto-disposed path is resolveListenable()), so this state is
+    // responsible for releasing the native handle.
+    final document = _document;
+    _document = null;
+    if (document != null) unawaited(document.dispose());
+    super.dispose();
+  }
+
   Future<void> _loadDocument() async {
+    final generation = ++_loadGeneration;
+    final previous = _document;
     setState(() {
       _document = null;
       _error = null;
     });
+    if (previous != null) unawaited(previous.dispose());
     try {
       final doc = await widget.source.loadDocument((_, [__]) {});
-      if (mounted) setState(() => _document = doc);
+      if (!mounted || generation != _loadGeneration) {
+        unawaited(doc.dispose());
+        return;
+      }
+      setState(() => _document = doc);
+      widget.onDocumentLoaded?.call(doc.pages.length);
     } catch (e) {
-      if (mounted) setState(() => _error = e);
+      if (!mounted || generation != _loadGeneration) return;
+      setState(() => _error = e);
     }
   }
 
@@ -131,8 +175,11 @@ class _FlipBookPdfState extends State<FlipBookPdf> {
       pageCount: pageCount,
       controller: widget.controller,
       initialPage: widget.initialPage,
-      flipDuration: widget.flipDuration,
-      hotZoneSize: widget.hotZoneSize,
+      // ignore: deprecated_member_use_from_same_package
+      flip: widget.flipDuration == null
+          ? widget.flip
+          // ignore: deprecated_member_use_from_same_package
+          : widget.flip.copyWith(duration: widget.flipDuration),
       showPageIndicator: widget.showPageIndicator,
       backgroundColor: widget.backgroundColor,
       spineColor: widget.spineColor,

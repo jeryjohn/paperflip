@@ -221,6 +221,7 @@ class PageFlipPainter extends CustomPainter {
     this.shadowColor = const Color(0x55000000),
     this.pageBackColor = const Color(0xFFEDEAE2),
     this.highlightColor = const Color(0x44FFFFFF),
+    this.showShadow = true,
   });
 
   final double progress;
@@ -229,6 +230,12 @@ class PageFlipPainter extends CustomPainter {
   final Color shadowColor;
   final Color pageBackColor;
   final Color highlightColor;
+
+  /// Whether to draw the crease shadow and highlight.
+  ///
+  /// The back face is always painted: it is what fills the lifted flap, so
+  /// skipping it would leave a transparent hole showing the page beneath.
+  final bool showShadow;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -240,9 +247,9 @@ class PageFlipPainter extends CustomPainter {
       progress: progress,
     );
 
-    _paintCreaseShadow(canvas, size, geo);
+    if (showShadow) _paintCreaseShadow(canvas, size, geo);
     _paintBackFace(canvas, geo);
-    _paintCreaseHighlight(canvas, geo);
+    if (showShadow) _paintCreaseHighlight(canvas, geo);
   }
 
   /// Soft shadow cast just past the crease onto the stationary page.
@@ -338,5 +345,9 @@ class PageFlipPainter extends CustomPainter {
   bool shouldRepaint(covariant PageFlipPainter old) =>
       old.progress != progress ||
       old.corner != corner ||
-      old.isForward != isForward;
+      old.isForward != isForward ||
+      old.showShadow != showShadow ||
+      old.shadowColor != shadowColor ||
+      old.pageBackColor != pageBackColor ||
+      old.highlightColor != highlightColor;
 }

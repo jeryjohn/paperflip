@@ -1,6 +1,7 @@
 import 'package:flutter/widgets.dart';
 
 import 'package:flip_book/src/flip_book_controller.dart';
+import 'package:flip_book/src/flip_settings.dart';
 import 'package:flip_book/src/flip_corner.dart';
 import 'package:flip_book/src/page_flip_painter.dart';
 
@@ -40,7 +41,10 @@ class FlipBookWidget extends StatefulWidget {
     required this.pageBuilder,
     this.controller,
     this.initialPage = 0,
-    this.flipDuration = const Duration(milliseconds: 600),
+    this.flip = const FlipSettings(),
+    @Deprecated('Use flip: FlipSettings(duration: ...). Removed in 0.3.0.')
+    this.flipDuration,
+    @Deprecated('No longer used; a drag anywhere flips. Removed in 0.3.0.')
     this.hotZoneSize = 60.0,
     this.showPageIndicator = true,
     this.backgroundColor = const Color(0xFFE8E4DC),
@@ -60,11 +64,30 @@ class FlipBookWidget extends StatefulWidget {
   /// The page displayed on first build (zero-based).
   final int initialPage;
 
+  /// Page-flip animation configuration.
+  ///
+  /// See [FlipSettings] for enabling/disabling the curl and tuning its
+  /// duration, easing, shadow and back face.
+  final FlipSettings flip;
+
   /// Duration of a single page-flip animation.
-  final Duration flipDuration;
+  @Deprecated('Use flip: FlipSettings(duration: ...). Removed in 0.3.0.')
+  final Duration? flipDuration;
 
   /// Size in logical pixels of each hot-corner trigger zone.
+  ///
+  /// Unused: a horizontal drag anywhere on the book drives a flip.
+  @Deprecated('No longer used; a drag anywhere flips. Removed in 0.3.0.')
   final double hotZoneSize;
+
+  /// The settings actually in force, honouring the deprecated [flipDuration]
+  /// when a caller still sets it.
+  FlipSettings get effectiveFlip {
+    // ignore: deprecated_member_use_from_same_package
+    final legacy = flipDuration;
+    if (legacy == null) return flip;
+    return flip.copyWith(duration: legacy);
+  }
 
   /// Whether to show the page number indicator at the bottom.
   final bool showPageIndicator;
@@ -91,14 +114,59 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
   FlipCorner _activeCorner = FlipCorner.bottomRight;
   bool _isDragging = false;
   double _dragProgress = 0.0;
+
+  // Drag distance as a 0..1 fraction, tracked even when the curl is disabled
+  // so the release threshold still has something to test.
+  double _rawDragProgress = 0.0;
   bool _isForward = true;
 
   // Drag gesture state.
   Offset? _dragStart;
   bool _dragDecided = false;
 
-  // Single controller used to settle a released drag to 0 or 1.
-  AnimationController? _settleCtrl;
+  // Settling a released drag to exactly 0 or 1. The controller is long-lived:
+  // it used to be allocated per drag and disposed from inside its own status
+  // listener, which is fragile and can assert in debug builds.
+  late final AnimationController _settleCtrl;
+  late CurvedAnimation _settleCurve;
+  double _settleFrom = 0.0;
+  double _settleTarget = 0.0;
+  bool _isSettling = false;
+
+  // Re-entrancy guard for _drainIntents.
+  bool _draining = false;
+
+  /// Settings currently in force: the widget's own, with any runtime overrides
+  /// from the controller applied on top.
+  late FlipSettings _flip;
+
+  FlipSettings get _resolvedFlip {
+    final base = widget.effectiveFlip;
+    final controller = _controller;
+    return controller == null ? base : controller.applyFlipOverrides(base);
+  }
+
+  /// Re-resolves the settings and re-syncs anything derived from them.
+  void _syncFlip() {
+    final next = _resolvedFlip;
+    final previous = _flip;
+    if (next == previous) return;
+    _flip = next;
+
+    _animCtrl.duration = next.duration;
+    if (previous.curve != next.curve) {
+      _curvedAnim.dispose();
+      _curvedAnim = CurvedAnimation(parent: _animCtrl, curve: next.curve);
+    }
+    if (previous.settleCurve != next.settleCurve) {
+      _settleCurve.dispose();
+      _settleCurve =
+          CurvedAnimation(parent: _settleCtrl, curve: next.settleCurve);
+    }
+    // Disabling mid-flight must not strand a half-turned sheet.
+    if (!next.enabled) _abortInFlightFlip();
+    if (mounted) setState(() {});
+  }
 
   FlipBookController? get _controller => widget.controller;
 
@@ -107,14 +175,28 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
     super.initState();
     _currentPage = widget.initialPage.clamp(0, widget.pageCount - 1);
 
+    _flip = _resolvedFlip;
+    final flip = _flip;
+
     _animCtrl = AnimationController(
       vsync: this,
-      duration: widget.flipDuration,
+      duration: flip.duration,
     )..addStatusListener(_onAnimStatus);
 
     _curvedAnim = CurvedAnimation(
       parent: _animCtrl,
-      curve: Curves.easeInOut,
+      curve: flip.curve,
+    );
+
+    _settleCtrl = AnimationController(
+      vsync: this,
+      duration: flip.duration,
+    )
+      ..addListener(_onSettleTick)
+      ..addStatusListener(_onSettleStatus);
+    _settleCurve = CurvedAnimation(
+      parent: _settleCtrl,
+      curve: flip.settleCurve,
     );
 
     _controller?.attach(widget.pageCount, _currentPage);
@@ -128,38 +210,92 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
       old.controller?.removeListener(_onControllerUpdate);
       _controller?.attach(widget.pageCount, _currentPage);
       _controller?.addListener(_onControllerUpdate);
+    } else if (old.pageCount != widget.pageCount) {
+      // The book kept its identity but grew or shrank -- an EPUB
+      // re-paginating, say. Without this the controller keeps the old count
+      // and clamps goToPage against it.
+      final last = widget.pageCount <= 0 ? 0 : widget.pageCount - 1;
+      final clamped = _currentPage.clamp(0, last);
+      if (clamped != _currentPage) {
+        _currentPage = clamped;
+        _controller?.reportPage(_currentPage);
+      }
+      _controller?.updatePageCount(widget.pageCount);
     }
-    if (old.flipDuration != widget.flipDuration) {
-      _animCtrl.duration = widget.flipDuration;
-    }
+    _syncFlip();
   }
 
   @override
   void dispose() {
     _controller?.removeListener(_onControllerUpdate);
-    _settleCtrl?.dispose();
-    _animCtrl.dispose();
+    // A CurvedAnimation must be disposed before the parent it listens to.
+    _settleCurve.dispose();
+    _settleCtrl.dispose();
     _curvedAnim.dispose();
+    _animCtrl.dispose();
     super.dispose();
   }
 
   // ── Controller integration ────────────────────────────────────────────────
 
   void _onControllerUpdate() {
-    final intent = _controller?.pendingIntent;
-    if (intent == null) return;
-    _controller?.clearIntent();
+    // The controller can carry runtime flip overrides as well as intents.
+    _syncFlip();
+    _drainIntents();
+  }
 
-    if (!intent.animate) {
-      setState(() => _currentPage = intent.targetPage);
-      _controller?.reportPage(_currentPage);
+  /// Consumes queued controller intents.
+  ///
+  /// Only one animated flip can be in flight at a time, so this stops as soon
+  /// as it starts one, and is called again from [_onAnimStatus] once that flip
+  /// commits. Instant intents are applied in a loop since they cost no time.
+  void _drainIntents() {
+    // Committing a flip notifies the controller, which re-enters here. Without
+    // this guard the nested call starts the next flip and the outer
+    // _animCtrl.reset() immediately kills it, stalling the queue forever.
+    if (_draining) return;
+    _draining = true;
+    try {
+      _drainIntentsInner();
+    } finally {
+      _draining = false;
+    }
+  }
+
+  void _drainIntentsInner() {
+    final controller = _controller;
+    if (controller == null || !mounted) return;
+
+    // A flip or a released drag is already running; we are called again when
+    // it commits.
+    if (_animCtrl.isAnimating || _isSettling || _isDragging) return;
+
+    while (true) {
+      final intent = controller.pendingIntent;
+      if (intent == null) return;
+      controller.clearIntent();
+
+      final target = intent.targetPage.clamp(0, widget.pageCount - 1);
+      if (target == _currentPage) continue; // nothing to do; try the next one
+
+      if (!intent.animate) {
+        setState(() => _currentPage = target);
+        controller.reportPage(_currentPage);
+        continue;
+      }
+
+      if (!_flip.enabled) {
+        setState(() => _currentPage = target);
+        controller.reportPage(_currentPage);
+        continue;
+      }
+
+      _startAnimatedFlip(
+        toPage: target,
+        corner: intent.corner,
+      );
       return;
     }
-
-    _startAnimatedFlip(
-      toPage: intent.targetPage,
-      corner: intent.corner,
-    );
   }
 
   // ── Animation ─────────────────────────────────────────────────────────────
@@ -170,6 +306,12 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
   }) {
     if (_animCtrl.isAnimating) return;
     if (toPage == _currentPage) return;
+
+    if (!_flip.enabled) {
+      setState(() => _currentPage = toPage.clamp(0, widget.pageCount - 1));
+      _controller?.reportPage(_currentPage);
+      return;
+    }
 
     setState(() {
       _activeCorner = corner;
@@ -185,9 +327,30 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
   void _onAnimStatus(AnimationStatus status) {
     if (status == AnimationStatus.completed) {
       // A button-driven flip ran to completion via _animCtrl.
-      _commitFlip(_isForward);
+      //
+      // Reset before committing: _commitFlip notifies the controller, and a
+      // re-entrant drain that started a new flip would be clobbered by a
+      // reset() issued afterwards.
       _animCtrl.reset();
+      _commitFlip(_isForward);
       _controller?.reportAnimating(false);
+      // Pick up the next queued intent, if any (e.g. a multi-page goToPage).
+      _drainIntents();
+    }
+  }
+
+  /// Stops any flip in progress and commits it, so switching
+  /// [FlipSettings.enabled] to `false` mid-turn cannot strand a half-turned
+  /// sheet on screen.
+  void _abortInFlightFlip() {
+    if (_animCtrl.isAnimating) {
+      _animCtrl.stop();
+      _animCtrl.reset();
+      _commitFlip(_isForward);
+      _controller?.reportAnimating(false);
+    }
+    if (_isSettling) {
+      _finishSettle(_settleTarget);
     }
   }
 
@@ -210,14 +373,14 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
   // never freeze mid-turn.
 
   void _onPanStart(DragStartDetails details, Size size) {
-    if (_animCtrl.isAnimating || _settleCtrl != null) return;
+    if (_animCtrl.isAnimating || _isSettling) return;
     _dragStart = details.localPosition;
     _dragDecided = false;
     _isDragging = false;
   }
 
   void _onPanUpdate(DragUpdateDetails details, Size size) {
-    if (_animCtrl.isAnimating || _settleCtrl != null) return;
+    if (_animCtrl.isAnimating || _isSettling) return;
     final start = _dragStart;
     if (start == null) return;
 
@@ -240,12 +403,17 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
             : (fromTop ? FlipCorner.topLeft : FlipCorner.bottomLeft);
         _dragProgress = 0.0;
       });
+      _rawDragProgress = 0.0;
     }
 
     if (!_isDragging) return;
     // Progress is the horizontal distance travelled across the page width.
     final travelled = (details.localPosition.dx - start.dx).abs();
     final progress = (travelled / size.width).clamp(0.0, 1.0);
+    _rawDragProgress = progress;
+    // With the curl disabled the page must not visibly move; the release
+    // threshold reads _rawDragProgress instead.
+    if (!_flip.enabled) return;
     setState(() => _dragProgress = progress);
   }
 
@@ -257,7 +425,14 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
     // Fling velocity also counts toward committing the flip.
     final vx = details.velocity.pixelsPerSecond.dx;
     final flung = _isForward ? vx < -250 : vx > 250;
-    final shouldComplete = _dragProgress > 0.35 || flung;
+    final shouldComplete = _rawDragProgress > 0.35 || flung;
+    _rawDragProgress = 0.0;
+
+    if (!_flip.enabled) {
+      if (shouldComplete) _commitFlip(_isForward);
+      _drainIntents();
+      return;
+    }
 
     _settleTo(shouldComplete ? 1.0 : 0.0);
   }
@@ -266,7 +441,10 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
   /// a single controller, then commits the page (if target == 1) and clears the
   /// drag state. Guarantees the flip never rests at a partial value.
   void _settleTo(double target) {
-    _settleCtrl?.dispose();
+    if (!_flip.enabled) {
+      _finishSettle(target);
+      return;
+    }
     final from = _dragProgress;
     final distance = (target - from).abs();
     if (distance < 0.001) {
@@ -274,37 +452,48 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
       return;
     }
 
-    final ctrl = AnimationController(
-      vsync: this,
-      duration: Duration(
-        milliseconds:
-            (widget.flipDuration.inMilliseconds * distance).round().clamp(120, 600),
-      ),
+    _settleFrom = from;
+    _settleTarget = target;
+    _isSettling = true;
+    final total = _flip.duration.inMilliseconds;
+    _settleCtrl.duration = Duration(
+      // Proportional to the remaining travel, with a floor so a tiny
+      // correction still reads as motion. Derived from the configured
+      // duration rather than a fixed 120..600 window, which used to cap it.
+      milliseconds: (total * distance).round().clamp(
+            (total ~/ 5).clamp(1, 120),
+            total <= 0 ? 1 : total,
+          ),
     );
-    _settleCtrl = ctrl;
-    final anim = Tween<double>(begin: from, end: target)
-        .animate(CurvedAnimation(parent: ctrl, curve: Curves.easeOut));
-
-    anim.addListener(() {
-      setState(() => _dragProgress = anim.value);
-    });
-    ctrl.addStatusListener((status) {
-      if (status == AnimationStatus.completed) {
-        _finishSettle(target);
-      }
-    });
     _controller?.reportAnimating(true);
-    ctrl.forward();
+    _settleCtrl.forward(from: 0.0);
+  }
+
+  void _onSettleTick() {
+    if (!_isSettling) return;
+    final t = _settleCurve.value;
+    setState(() {
+      _dragProgress = _settleFrom + (_settleTarget - _settleFrom) * t;
+    });
+  }
+
+  void _onSettleStatus(AnimationStatus status) {
+    if (status == AnimationStatus.completed && _isSettling) {
+      _finishSettle(_settleTarget);
+    }
   }
 
   void _finishSettle(double target) {
-    _settleCtrl?.dispose();
-    _settleCtrl = null;
+    _isSettling = false;
+    _settleCtrl.stop();
+    _settleCtrl.value = 0.0;
     if (target >= 1.0) {
       _commitFlip(_isForward);
     }
     setState(() => _dragProgress = 0.0);
     _controller?.reportAnimating(false);
+    // A drag may have raced queued controller intents; resume them now.
+    _drainIntents();
   }
 
   // ── Layout ────────────────────────────────────────────────────────────────
@@ -348,6 +537,8 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
         final progress =
             _animCtrl.isAnimating ? _curvedAnim.value : _dragProgress;
 
+        final flip = _flip;
+
         // The flip always turns one physical sheet. Forward turns the current
         // page; backward turns the previous page back into view. In both cases
         // the turning sheet's front is `baseIndex` and the page exposed beneath
@@ -368,6 +559,8 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
           corner: _activeCorner,
           isForward: _isForward,
           pageBackColor: widget.pageBackColor,
+                    showShadow: flip.showShadow,
+                    showBackFace: flip.showBackFace,
           // Bottom: the page revealed as the current page lifts away.
           revealed: _page(context, revealedIndex, constraints),
           // Stationary remainder of the current page (un-turned part).
@@ -403,6 +596,8 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
           Size(halfW, constraints.maxHeight),
         );
 
+        final flip = _flip;
+
         // Even pages sit on the left, odd on the right.
         final leftIndex = _currentPage.isEven ? _currentPage : _currentPage - 1;
         final rightIndex = leftIndex + 1;
@@ -432,6 +627,8 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
                     corner: _activeCorner,
                     isForward: true,
                     pageBackColor: widget.pageBackColor,
+                    showShadow: flip.showShadow,
+                    showBackFace: flip.showBackFace,
                     revealed: _page(context, rightIndex + 1, pageConstraints),
                     stationary: _page(context, rightIndex, pageConstraints),
                     turningFront:
@@ -454,6 +651,8 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
                     corner: _activeCorner,
                     isForward: false,
                     pageBackColor: widget.pageBackColor,
+                    showShadow: flip.showShadow,
+                    showBackFace: flip.showBackFace,
                     revealed: _page(context, leftIndex - 1, pageConstraints),
                     stationary: _page(context, leftIndex, pageConstraints),
                     turningFront: _page(context, leftIndex, pageConstraints),
@@ -517,6 +716,8 @@ class _FlipLayers extends StatelessWidget {
     required this.corner,
     required this.isForward,
     required this.pageBackColor,
+    required this.showShadow,
+    required this.showBackFace,
     required this.revealed,
     required this.stationary,
     required this.turningFront,
@@ -527,6 +728,8 @@ class _FlipLayers extends StatelessWidget {
   final FlipCorner corner;
   final bool isForward;
   final Color pageBackColor;
+  final bool showShadow;
+  final bool showBackFace;
   final Widget revealed;
   final Widget stationary;
   final Widget turningFront;
@@ -559,17 +762,21 @@ class _FlipLayers extends StatelessWidget {
             corner: corner,
             isForward: isForward,
             pageBackColor: pageBackColor,
+            showShadow: showShadow,
           ),
         ),
 
-        // 4. Front of the turning page, mirrored onto the flap and clipped to it.
-        ClipPath(
-          clipper: _PathClipper(geo.flapPath),
-          child: Transform(
-            transform: geo.flapReflection,
-            child: turningFront,
+        // 4. Front of the turning page, mirrored onto the flap and clipped to
+        //    it. When the back face is off, the painter's paper gradient (drawn
+        //    in layer 3) is left showing through instead.
+        if (showBackFace)
+          ClipPath(
+            clipper: _PathClipper(geo.flapPath),
+            child: Transform(
+              transform: geo.flapReflection,
+              child: turningFront,
+            ),
           ),
-        ),
       ],
     );
   }

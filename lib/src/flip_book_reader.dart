@@ -8,6 +8,7 @@ import 'package:pdfrx/pdfrx.dart';
 
 import 'package:flip_book/src/flip_book_controller.dart';
 import 'package:flip_book/src/flip_book_pdf.dart';
+import 'package:flip_book/src/flip_settings.dart';
 import 'package:flip_book/src/page_selector_dialog.dart';
 
 /// Devices with this much RAM or less use the lightweight (non-flip) viewer.
@@ -48,6 +49,7 @@ class FlipBookReader extends StatefulWidget {
     this.showAppBar,
     this.errorTitleBuilder,
     this.errorMessageBuilder,
+    this.flip = const FlipSettings(),
   });
 
   /// Title shown in the app bar. Defaults to an empty string.
@@ -85,6 +87,12 @@ class FlipBookReader extends StatefulWidget {
 
   /// How long controls stay visible before auto-hiding. Defaults to 3s.
   final Duration? controlsAutoHideDuration;
+
+  /// Page-flip animation configuration passed to the flip viewer.
+  ///
+  /// Has no effect while the lightweight [PdfViewer] fallback is active (on
+  /// low-memory devices or while zooming).
+  final FlipSettings flip;
 
   /// Whether to show the app bar. Defaults to `true`.
   final bool? showAppBar;
@@ -132,6 +140,9 @@ class _FlipBookReaderState extends State<FlipBookReader> {
       _ownsFlipController = true;
     }
     _currentPage = (widget.initialPage ?? 1).clamp(1, 1 << 30);
+    // The flip viewer drives page changes through the controller; without
+    // this the reader's "N of M" counter never advances in flip mode.
+    _flipController.addListener(_onFlipPageChanged);
 
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
@@ -144,11 +155,13 @@ class _FlipBookReaderState extends State<FlipBookReader> {
 
   @override
   void dispose() {
-    SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.portraitDown,
-    ]);
+    // Hand orientation back to the host app rather than forcing portrait:
+    // an empty list re-applies whatever the platform manifest allows. Flutter
+    // exposes no way to read the previous preference, so this is the closest
+    // we can get to "restore".
+    SystemChrome.setPreferredOrientations(const []);
     _hideControlsTimer?.cancel();
+    _flipController.removeListener(_onFlipPageChanged);
     if (_ownsFlipController) _flipController.dispose();
     super.dispose();
   }
@@ -212,8 +225,52 @@ class _FlipBookReaderState extends State<FlipBookReader> {
     }
   }
 
-  /// Resolve the configured source into a [PdfDocumentRef], or `null` if none.
+  /// Mirrors the flip controller's zero-based page onto the reader's
+  /// one-based [_currentPage].
+  void _onFlipPageChanged() {
+    if (!mounted) return;
+    final page = _flipController.currentPage + 1;
+    if (page == _currentPage) return;
+    setState(() => _currentPage = page);
+  }
+
+  /// The resolved document ref, built once per source rather than per build.
+  ///
+  /// This used to be a plain getter, so every rebuild minted a fresh
+  /// [PdfDocumentRef]; [FlipBookPdf] compares its source with `!=`, so an
+  /// unstable identity re-triggered a full document load on every setState.
+  PdfDocumentRef? _cachedSource;
+  String? _cachedSourceKey;
+
   PdfDocumentRef? get _source {
+    final key = _sourceKey;
+    if (key == null) {
+      _cachedSource = null;
+      _cachedSourceKey = null;
+      return null;
+    }
+    if (key != _cachedSourceKey) {
+      _cachedSourceKey = key;
+      _cachedSource = _buildSource();
+    }
+    return _cachedSource;
+  }
+
+  /// Identity of the configured source, used to decide when to rebuild it.
+  String? get _sourceKey {
+    if (widget.pdfFilePath != null && widget.pdfFilePath!.isNotEmpty) {
+      return 'file:${widget.pdfFilePath}';
+    }
+    if (widget.pdfAssetPath != null && widget.pdfAssetPath!.isNotEmpty) {
+      return 'asset:${widget.pdfAssetPath}';
+    }
+    if (widget.pdfUrl != null && widget.pdfUrl!.isNotEmpty) {
+      return 'uri:${widget.pdfUrl}';
+    }
+    return null;
+  }
+
+  PdfDocumentRef? _buildSource() {
     if (widget.pdfFilePath != null && widget.pdfFilePath!.isNotEmpty) {
       return PdfDocumentRefFile(widget.pdfFilePath!);
     }
@@ -500,7 +557,15 @@ class _FlipBookReaderState extends State<FlipBookReader> {
       source: source,
       controller: _flipController,
       initialPage: (_currentPage - 1).clamp(0, 1 << 30),
+      flip: widget.flip,
       showPageIndicator: false,
+      // Without this the flip path never reports a page count, leaving the
+      // app-bar counter, the prev/next FABs and the page selector hidden
+      // unless the user happened to enter zoom or low-memory mode.
+      onDocumentLoaded: (pageCount) {
+        if (!mounted || pageCount == _pageCount) return;
+        setState(() => _pageCount = pageCount);
+      },
       loadingBuilder: (context) => const Center(
         child: CircularProgressIndicator(),
       ),

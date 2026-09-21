@@ -40,3 +40,6 @@ app.*.map.json
 
 # Coverage
 coverage/
+
+# FVM Version Cache
+.fvm/
