@@ -15,6 +15,7 @@ dependencies:
   flutter_widget_from_html_core: ^0.17.4
   html: ^0.15.4
   http: ^1.2.0
+  meta: ^1.16.0
   pdfrx: ^2.4.4
 
 dev_dependencies:

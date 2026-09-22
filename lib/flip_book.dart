@@ -15,6 +15,7 @@ export 'src/epub/flip_book_epub.dart';
 export 'src/flip_book.dart';
 export 'src/flip_book_controller.dart';
 export 'src/flip_book_widget.dart';
+export 'src/mesh_flip_book.dart';
 export 'src/flip_settings.dart';
 export 'src/flip_book_pdf.dart';
 export 'src/flip_book_reader.dart';

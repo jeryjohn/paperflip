@@ -13,6 +13,9 @@ dependencies:
   flip_book:
     path: ../
 
+flutter:
+  uses-material-design: true
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
