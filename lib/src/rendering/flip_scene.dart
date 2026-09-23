@@ -146,7 +146,7 @@ class SheetRoles {
   ///
   /// Forward: lift the current page and reveal the next.
   ///
-  /// Backward: bring the previous page over the current page.
+  /// Backward: turn the current page backward and reveal the previous.
   factory SheetRoles.forTurn({
     required int currentPage,
     required bool forward,
@@ -158,14 +158,14 @@ class SheetRoles {
             direction: 1,
           )
         : SheetRoles(
-            turningFront: currentPage - 1,
-            revealed: currentPage,
+            turningFront: currentPage,
+            revealed: currentPage - 1,
             direction: -1,
           );
   }
 
   /// Page index on which the book lands when the turn completes.
-  int get destination => direction > 0 ? revealed : turningFront;
+  int get destination => revealed;
 
   /// Whether the role data refers to a forward turn.
   bool get isForward => direction > 0;

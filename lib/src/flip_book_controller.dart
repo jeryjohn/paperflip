@@ -291,8 +291,16 @@ class FlipBookController extends ChangeNotifier {
     return future;
   }
 
-  /// Moves one page forward without a curl animation.
-  void nextPage() {
+  /// Moves one page forward.
+  ///
+  /// Set [animate] to true to use the curl animation (defaults to false for
+  /// backward compatibility with instant page stepping; callers seeking
+  /// animated page turns should prefer [flipNext]).
+  void nextPage({bool animate = false}) {
+    if (animate) {
+      flipNext();
+      return;
+    }
     final from = _projectedPage;
 
     if (_pageCount <= 0 || from >= _pageCount - 1) {
@@ -302,8 +310,16 @@ class FlipBookController extends ChangeNotifier {
     _enqueue(FlipIntent.instant(targetPage: from + 1));
   }
 
-  /// Moves one page backward without a curl animation.
-  void previousPage() {
+  /// Moves one page backward.
+  ///
+  /// Set [animate] to true to use the curl animation (defaults to false for
+  /// backward compatibility with instant page stepping; callers seeking
+  /// animated page turns should prefer [flipPrev]).
+  void previousPage({bool animate = false}) {
+    if (animate) {
+      flipPrev();
+      return;
+    }
     final from = _projectedPage;
 
     if (_pageCount <= 0 || from <= 0) {

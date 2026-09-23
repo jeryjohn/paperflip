@@ -48,24 +48,17 @@ class PageCurlRenderer {
 
   int _orderedTriangleCount = 0;
 
-  /// Draws [mesh] deformed by [params], sampling [atlas].
+  /// Computes deformation, normals, and perspective projection in one pass.
   ///
-  /// [origin] offsets the sheet within the canvas, for a spread's right half.
-  /// Returns `false` when the frame is unsafe to draw and the caller should
-  /// keep the live page visible instead of displaying a malformed mesh.
-  bool paint(
-    Canvas canvas,
+  /// Returns `false` when more than 30% of vertices clamp at an extreme perspective angle.
+  bool deformAndProject(
     PageCurlMesh mesh,
-    CurlParameters params,
-    SheetAtlas atlas, {
+    CurlParameters params, {
     required PageCurlCamera camera,
     Offset origin = Offset.zero,
     bool spineAtCentre = false,
-    PageCurlLighting lighting = const PageCurlLighting(),
   }) {
-    if (_invalidAtlas(atlas) || mesh.vertexCount == 0) {
-      return false;
-    }
+    if (mesh.vertexCount == 0) return false;
 
     _geometry.deform(
       mesh,
@@ -81,11 +74,40 @@ class PageCurlRenderer {
       origin: origin,
     );
 
-    // A few vertices can legitimately clamp at an extreme perspective angle.
-    // If a large fraction becomes invalid, drawing the result produces huge
-    // stretched triangles and is visually worse than dropping that frame.
-    if (bad > mesh.vertexCount * 0.30) {
+    return bad <= mesh.vertexCount * 0.30;
+  }
+
+  /// Draws [mesh] deformed by [params], sampling [atlas].
+  ///
+  /// [origin] offsets the sheet within the canvas, for a spread's right half.
+  /// Set [alreadyDeformed] to true if [deformAndProject] was already run on [mesh]
+  /// for this frame (e.g. by shadow calculation).
+  /// Returns `false` when the frame is unsafe to draw and the caller should
+  /// keep the live page visible instead of displaying a malformed mesh.
+  bool paint(
+    Canvas canvas,
+    PageCurlMesh mesh,
+    CurlParameters params,
+    SheetAtlas atlas, {
+    required PageCurlCamera camera,
+    Offset origin = Offset.zero,
+    bool spineAtCentre = false,
+    PageCurlLighting lighting = const PageCurlLighting(),
+    bool alreadyDeformed = false,
+  }) {
+    if (_invalidAtlas(atlas) || mesh.vertexCount == 0) {
       return false;
+    }
+
+    if (!alreadyDeformed) {
+      final ok = deformAndProject(
+        mesh,
+        params,
+        camera: camera,
+        origin: origin,
+        spineAtCentre: spineAtCentre,
+      );
+      if (!ok) return false;
     }
 
     if (!_updateTextureCoordinates(mesh, atlas, params)) {
@@ -125,13 +147,37 @@ class PageCurlRenderer {
   /// Points every vertex at the appropriate sheet-face region.
   ///
   /// The current paper model intentionally treats the turning sheet as a
-  /// single front-facing digital page whose reverse is blank paper. The
-  /// halfway transition therefore switches the UV region once the sheet has
-  /// passed the midpoint.
+  /// Resolves whether the back face of the sheet should be shown.
+  @visibleForTesting
+  static bool resolveShowBack({
+    required bool isSingleFace,
+    required double progress,
+    required int direction,
+  }) {
+    if (isSingleFace) return false;
+    return progress > 0.5;
+  }
+
+  /// Resolves whether the UV coordinates along U should be inverted.
   ///
-  /// Keeping the UV mapping continuous and centralized here is important:
-  /// [SheetAtlas] controls pixel ownership, while this class controls how the
-  /// mesh samples those pixels.
+  /// In forward turns (direction >= 0), mesh coordinate `u` runs left-to-right (0 at spineX=0, 1 at free edge).
+  /// In backward turns (direction < 0), mesh coordinate `u` runs right-to-left (0 at spineX=w, 1 at free edge=0).
+  /// Inverting U during backward turns ensures text/content reads naturally left-to-right on screen
+  /// without being horizontally mirrored or reversed.
+  /// Content is never mirrored merely because the back face is being displayed.
+  @visibleForTesting
+  static bool resolveMirrorHorizontally({
+    required int direction,
+    required bool showBack,
+  }) {
+    return direction < 0;
+  }
+
+  /// Points every vertex at the appropriate sheet-face region.
+  ///
+  /// The current paper model treats the turning sheet as a front-facing
+  /// digital page whose reverse is blank paper. The midpoint transition
+  /// switches to the paper back face once the sheet has turned over.
   bool _updateTextureCoordinates(
     PageCurlMesh mesh,
     SheetAtlas atlas,
@@ -139,7 +185,11 @@ class PageCurlRenderer {
   ) {
     if (atlas.isDisposed) return false;
 
-    final showBack = !atlas.isSingleFace && params.progress > 0.5;
+    final showBack = resolveShowBack(
+      isSingleFace: atlas.isSingleFace,
+      progress: params.progress,
+      direction: params.direction,
+    );
     final region = showBack ? atlas.backRegion : atlas.frontRegion;
 
     if (!_isValidRegion(atlas.image, region)) return false;
@@ -149,11 +199,14 @@ class PageCurlRenderer {
     final inset = region.deflate(0.5);
     if (inset.width <= 0 || inset.height <= 0) return false;
 
+    final mirrorHorizontally = resolveMirrorHorizontally(
+      direction: params.direction,
+      showBack: showBack,
+    );
+
     mesh.updateTextureRegion(
       inset,
-      // A back page is viewed from the reverse side of the sheet, so its
-      // horizontal reading direction is mirrored. V remains unchanged.
-      mirrorHorizontally: showBack,
+      mirrorHorizontally: mirrorHorizontally,
     );
 
     return true;

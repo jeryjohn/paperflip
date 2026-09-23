@@ -9,6 +9,7 @@ import 'package:flip_book/src/flip_book_controller.dart';
 import 'package:flip_book/src/flip_book_pdf.dart';
 import 'package:flip_book/src/flip_book_widget.dart';
 import 'package:flip_book/src/flip_settings.dart';
+import 'package:flip_book/src/mesh_flip_book.dart';
 
 enum _FlipBookMode { pdf, epub, custom }
 
@@ -30,7 +31,7 @@ enum _FlipBookMode { pdf, epub, custom }
 /// ```
 ///
 /// Each constructor delegates to the widget for that content type
-/// ([FlipBookEpub], [FlipBookPdf], [FlipBookWidget]), which remain public and
+/// ([FlipBookEpub], [FlipBookPdf], [MeshFlipBook]), which remain public and
 /// can be used directly.
 class FlipBook extends StatelessWidget {
   /// A PDF book. PDFs are fixed-layout: there is no font reflow.
@@ -47,6 +48,7 @@ class FlipBook extends StatelessWidget {
     this.loadingBuilder,
     this.errorBuilder,
     this.onPageCountAvailable,
+    this.useVolumeKeys = false,
   }) : _mode = _FlipBookMode.pdf,
        _pdfSource = source,
        _epubSource = null,
@@ -69,6 +71,7 @@ class FlipBook extends StatelessWidget {
     this.showPageIndicator = true,
     this.loadingBuilder,
     this.errorBuilder,
+    this.useVolumeKeys = false,
   }) : _mode = _FlipBookMode.epub,
        _epubSource = source,
        _pdfSource = null,
@@ -92,6 +95,7 @@ class FlipBook extends StatelessWidget {
     this.backgroundColor = const Color(0xFFE8E4DC),
     this.spineColor = const Color(0xFFBBB5A8),
     this.pageBackColor = const Color(0xFFF0EEE8),
+    this.useVolumeKeys = false,
   }) : _mode = _FlipBookMode.custom,
        _pageCount = pageCount,
        _pageBuilder = pageBuilder,
@@ -102,6 +106,7 @@ class FlipBook extends StatelessWidget {
        loadingBuilder = null,
        errorBuilder = null,
        onPageCountAvailable = null;
+
 
   final _FlipBookMode _mode;
   final PdfDocumentRef? _pdfSource;
@@ -145,6 +150,9 @@ class FlipBook extends StatelessWidget {
   /// Reports the page count once a PDF has opened.
   final void Function(int pageCount)? onPageCountAvailable;
 
+  /// Whether physical volume buttons navigate pages on supported devices (Android).
+  final bool useVolumeKeys;
+
   @override
   Widget build(BuildContext context) {
     switch (_mode) {
@@ -161,6 +169,7 @@ class FlipBook extends StatelessWidget {
           loadingBuilder: loadingBuilder,
           errorBuilder: errorBuilder,
           onDocumentLoaded: onPageCountAvailable,
+          useVolumeKeys: useVolumeKeys,
         );
 
       case _FlipBookMode.epub:
@@ -173,19 +182,62 @@ class FlipBook extends StatelessWidget {
           showPageIndicator: showPageIndicator,
           loadingBuilder: loadingBuilder,
           errorBuilder: errorBuilder,
+          useVolumeKeys: useVolumeKeys,
         );
 
       case _FlipBookMode.custom:
-        return FlipBookWidget(
+        final flipBook = MeshFlipBook(
           pageCount: _pageCount!,
           pageBuilder: _pageBuilder!,
           controller: controller,
           flip: flip,
           initialPage: initialPage,
-          showPageIndicator: showPageIndicator,
           backgroundColor: backgroundColor,
-          spineColor: spineColor,
           pageBackColor: pageBackColor,
+          useVolumeKeys: useVolumeKeys,
+        );
+
+
+        if (!showPageIndicator || controller == null) {
+          return flipBook;
+        }
+
+        return Stack(
+          children: [
+            Positioned.fill(child: flipBook),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 12,
+              child: IgnorePointer(
+                child: Center(
+                  child: ListenableBuilder(
+                    listenable: controller!,
+                    builder: (context, _) => DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: const Color(0xAA000000),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 6,
+                        ),
+                        child: Text(
+                          '${controller!.currentPage + 1} / $_pageCount',
+                          style: const TextStyle(
+                            color: Color(0xFFFFFFFF),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
         );
     }
   }

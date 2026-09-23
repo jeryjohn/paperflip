@@ -22,3 +22,11 @@ dev_dependencies:
   flutter_lints: ^3.0.0
   flutter_test:
     sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: io.github.jeryjohn.paperflip
+        pluginClass: PaperflipPlugin
+

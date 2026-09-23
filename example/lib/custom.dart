@@ -15,6 +15,7 @@ class CustomScreen extends StatefulWidget {
 class _CustomScreenState extends State<CustomScreen> {
   final FlipBookController _controller = FlipBookController();
   bool _curlEnabled = true;
+  bool _useVolumeKeys = true;
   int _currentPage = 0;
 
   static const _pageCount = 8;
@@ -44,6 +45,26 @@ class _CustomScreenState extends State<CustomScreen> {
         title: const Text('Custom Widgets Demo'),
         actions: [
           IconButton(
+            tooltip: _useVolumeKeys
+                ? 'Volume keys enabled (Vol Up: Next, Vol Down: Prev)'
+                : 'Volume keys disabled',
+            icon: Icon(
+              _useVolumeKeys ? Icons.volume_up : Icons.volume_off,
+              color: _useVolumeKeys ? const Color(0xFF2E658C) : Colors.grey,
+            ),
+            onPressed: () {
+              setState(() => _useVolumeKeys = !_useVolumeKeys);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(_useVolumeKeys
+                      ? 'Volume keys enabled: Hardware buttons now turn pages'
+                      : 'Volume keys disabled: Default system volume restored'),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
+            },
+          ),
+          IconButton(
             key: const Key('custom_toggle_curl'),
             tooltip: _curlEnabled ? 'Disable 3D Curl' : 'Enable 3D Curl',
             icon: Icon(
@@ -56,6 +77,7 @@ class _CustomScreenState extends State<CustomScreen> {
               });
             },
           ),
+
           IconButton(
             key: const Key('custom_prev_button'),
             tooltip: 'Previous Page',
@@ -99,6 +121,7 @@ class _CustomScreenState extends State<CustomScreen> {
                           enabled: _curlEnabled,
                           duration: const Duration(milliseconds: 400),
                         ),
+                        useVolumeKeys: _useVolumeKeys,
                         pageBuilder: (context, index, constraints) {
                           return _buildPageCard(index);
                         },

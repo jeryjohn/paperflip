@@ -66,6 +66,7 @@ class _CommonScreenState extends State<CommonScreen> {
   );
 
   bool _showSettings = false;
+  bool _useVolumeKeys = true;
   late CommonBook _selectedBook;
 
   @override
@@ -105,6 +106,26 @@ class _CommonScreenState extends State<CommonScreen> {
         ),
         actions: [
           IconButton(
+            tooltip: _useVolumeKeys
+                ? 'Volume keys enabled (Vol Up: Next, Vol Down: Prev)'
+                : 'Volume keys disabled',
+            icon: Icon(
+              _useVolumeKeys ? Icons.volume_up : Icons.volume_off,
+              color: _useVolumeKeys ? theme.foreground : Colors.grey,
+            ),
+            onPressed: () {
+              setState(() => _useVolumeKeys = !_useVolumeKeys);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(_useVolumeKeys
+                      ? 'Volume keys enabled: Hardware buttons now turn pages'
+                      : 'Volume keys disabled: Default system volume restored'),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
+            },
+          ),
+          IconButton(
             key: const Key('common_toc_button'),
             tooltip: 'Table of Contents',
             icon: const Icon(Icons.list_alt_rounded),
@@ -140,7 +161,9 @@ class _CommonScreenState extends State<CommonScreen> {
                 source: widget.initialSource ?? _selectedBook.source,
                 controller: _flipController,
                 epubController: _epubController,
+                useVolumeKeys: _useVolumeKeys,
                 showPageIndicator: true,
+
                 loadingBuilder: (context) => Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,

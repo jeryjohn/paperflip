@@ -10,6 +10,7 @@ import 'package:flip_book/src/flip_book_controller.dart';
 import 'package:flip_book/src/flip_book_pdf.dart';
 import 'package:flip_book/src/flip_settings.dart';
 import 'package:flip_book/src/page_selector_dialog.dart';
+import 'package:flip_book/src/volume/volume_key_manager.dart';
 
 /// Devices with this much RAM or less use the lightweight (non-flip) viewer.
 const int _defaultLowMemoryThresholdMB = 3072; // 3 GB
@@ -50,7 +51,9 @@ class FlipBookReader extends StatefulWidget {
     this.errorTitleBuilder,
     this.errorMessageBuilder,
     this.flip = const FlipSettings(),
+    this.useVolumeKeys = false,
   });
+
 
   /// Title shown in the app bar. Defaults to an empty string.
   final String? title;
@@ -103,11 +106,15 @@ class FlipBookReader extends StatefulWidget {
   /// Maps an error to a message string. Falls back to a generic message.
   final String Function(Object error)? errorMessageBuilder;
 
+  /// Whether physical volume buttons navigate pages on supported devices (Android).
+  final bool useVolumeKeys;
+
   @override
   State<FlipBookReader> createState() => _FlipBookReaderState();
 }
 
-class _FlipBookReaderState extends State<FlipBookReader> {
+class _FlipBookReaderState extends State<FlipBookReader>
+    implements VolumeKeyClient {
   bool? _isLowMemoryDevice;
 
   late final PdfViewerController _pdfController;
@@ -144,6 +151,10 @@ class _FlipBookReaderState extends State<FlipBookReader> {
     // this the reader's "N of M" counter never advances in flip mode.
     _flipController.addListener(_onFlipPageChanged);
 
+    if (widget.useVolumeKeys) {
+      VolumeKeyManager.instance.registerClient(this);
+    }
+
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
       DeviceOrientation.portraitDown,
@@ -154,7 +165,20 @@ class _FlipBookReaderState extends State<FlipBookReader> {
   }
 
   @override
+  void didUpdateWidget(covariant FlipBookReader oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.useVolumeKeys != widget.useVolumeKeys) {
+      if (widget.useVolumeKeys) {
+        VolumeKeyManager.instance.registerClient(this);
+      } else {
+        VolumeKeyManager.instance.unregisterClient(this);
+      }
+    }
+  }
+
+  @override
   void dispose() {
+    VolumeKeyManager.instance.unregisterClient(this);
     // Hand orientation back to the host app rather than forcing portrait:
     // an empty list re-applies whatever the platform manifest allows. Flutter
     // exposes no way to read the previous preference, so this is the closest
@@ -165,6 +189,29 @@ class _FlipBookReaderState extends State<FlipBookReader> {
     if (_ownsFlipController) _flipController.dispose();
     super.dispose();
   }
+
+  @override
+  void onVolumeUp() {
+    if (_isLowMemoryDevice == true || _zoomMode) {
+      if (_pageCount > 0 && _currentPage < _pageCount) {
+        _jumpToPage(_currentPage + 1);
+      }
+    } else {
+      _flipController.flipNext();
+    }
+  }
+
+  @override
+  void onVolumeDown() {
+    if (_isLowMemoryDevice == true || _zoomMode) {
+      if (_pageCount > 0 && _currentPage > 1) {
+        _jumpToPage(_currentPage - 1);
+      }
+    } else {
+      _flipController.flipPrev();
+    }
+  }
+
 
   bool get _controlsPinned => _zoomMode;
 

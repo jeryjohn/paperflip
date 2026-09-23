@@ -1,9 +1,12 @@
 # Miscellaneous
 *.class
 *.log
+**/*.log
 *.pyc
 *.swp
+**/*.swp
 .DS_Store
+**/.DS_Store
 .atom/
 .build/
 .buildlog/
@@ -14,23 +17,70 @@ migrate_working_dir/
 
 # IntelliJ related
 *.iml
+**/*.iml
 *.ipr
 *.iws
 .idea/
+**/.idea/
 
 # VS Code
 .vscode/
+**/.vscode/
 
 # Flutter/Dart/Pub related
 **/doc/api/
 .dart_tool/
+**/.dart_tool/
 .flutter-plugins
 .flutter-plugins-dependencies
+**/.flutter-plugins*
 .packages
 .pub-cache/
+**/.pub-cache/
 .pub/
+**/.pub/
 build/
+**/build/
 pubspec.lock
+
+# Android related
+**/.gradle/
+**/local.properties
+**/android/local.properties
+**/captures/
+**/.cxx/
+**/*.keystore
+**/*.jks
+key.properties
+**/GeneratedPluginRegistrant.java
+**/GeneratedPluginRegistrant.kt
+
+# iOS / macOS related
+**/Pods/
+**/.symlinks/
+**/Flutter/ephemeral/
+**/Flutter/Generated.xcconfig
+**/Flutter/flutter_export_environment.sh
+**/Flutter/App.framework
+**/Flutter/Flutter.framework
+**/Flutter/Flutter.podspec
+**/Flutter/app.flx
+**/Flutter/app.zip
+**/Flutter/flutter_assets/
+**/DerivedData/
+**/*.mode1v3
+**/*.mode2v3
+**/*.moved-aside
+**/*.pbxuser
+**/*.perspectivev3
+**/*.xcuserstate
+**/project.xcworkspace/xcuserdata/
+**/xcuserdata/
+**/Runner/GeneratedPluginRegistrant.*
+**/.last_build_id
+
+# Auto-generated example iOS runner (when running on macOS)
+example/ios/
 
 # Symbolication related
 app.*.symbols
@@ -40,6 +90,7 @@ app.*.map.json
 
 # Coverage
 coverage/
+**/coverage/
 
 # FVM Version Cache
 .fvm/

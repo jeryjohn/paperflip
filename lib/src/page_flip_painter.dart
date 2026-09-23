@@ -213,6 +213,7 @@ class PageFoldGeometry {
 /// the bright crease highlight. The actual page *content* is drawn by the
 /// widget (clipped/transformed via [PageFoldGeometry]); this painter only adds
 /// the lighting that sells the curl.
+@Deprecated('Use PageCurlRenderer instead. Will be removed in a future release.')
 class PageFlipPainter extends CustomPainter {
   const PageFlipPainter({
     required this.progress,

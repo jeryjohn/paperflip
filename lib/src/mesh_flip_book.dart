@@ -9,15 +9,17 @@ import 'package:flutter/widgets.dart';
 import 'package:flip_book/src/capture/widget_page_rasterizer.dart';
 import 'package:flip_book/src/flip_book_controller.dart';
 import 'package:flip_book/src/flip_book_widget.dart' show FlipPageBuilder;
+import 'package:flip_book/src/flip_corner.dart';
 import 'package:flip_book/src/flip_settings.dart';
 import 'package:flip_book/src/pages/page_texture.dart';
 import 'package:flip_book/src/rendering/curl_parameters.dart';
 import 'package:flip_book/src/rendering/flip_scene.dart';
 import 'package:flip_book/src/rendering/page_curl_camera.dart';
-import 'package:flip_book/src/rendering/page_curl_geometry.dart';
 import 'package:flip_book/src/rendering/page_curl_mesh.dart';
 import 'package:flip_book/src/rendering/page_curl_renderer.dart';
 import 'package:flip_book/src/rendering/sheet_atlas.dart';
+import 'package:flip_book/src/volume/volume_key_manager.dart';
+
 
 /// A page-flip book rendered as a real texture-mapped 3D curl.
 ///
@@ -57,6 +59,7 @@ class MeshFlipBook extends StatefulWidget {
     this.capturePixelRatio = 2.0,
     this.debugShowMesh = false,
     this.contentVersion = 0,
+    this.useVolumeKeys = false,
   });
 
   /// Total number of pages.
@@ -103,12 +106,21 @@ class MeshFlipBook extends StatefulWidget {
   /// can remain the same function while the document it renders changes.
   final int contentVersion;
 
+  /// Whether physical volume buttons navigate pages on supported devices (Android).
+  ///
+  /// When `true`, Volume Up flips to the next page and Volume Down flips to
+  /// the previous page using the physical curl animation.
+  /// Defaults to `false`.
+  final bool useVolumeKeys;
+
   @override
-  State<MeshFlipBook> createState() => _MeshFlipBookState();
+  State<MeshFlipBook> createState() => MeshFlipBookState();
 }
 
-class _MeshFlipBookState extends State<MeshFlipBook>
-    with TickerProviderStateMixin {
+class MeshFlipBookState extends State<MeshFlipBook>
+    with TickerProviderStateMixin
+    implements VolumeKeyClient {
+
   final FlipScene _scene = FlipScene();
   final CurlSmoother _smoother = CurlSmoother();
   final PageTextureCache _cache = PageTextureCache();
@@ -178,7 +190,25 @@ class _MeshFlipBookState extends State<MeshFlipBook>
       ? widget.capturePixelRatio
       : 1.0;
 
-  FlipBookController? get _controller => widget.controller;
+  FlipBookController? _internalController;
+  FlipBookController get _effectiveController =>
+      widget.controller ?? (_internalController ??= FlipBookController());
+  FlipBookController? get _controller => _effectiveController;
+
+  @visibleForTesting
+  FlipScene get debugScene => _scene;
+
+  @visibleForTesting
+  SheetRoles? get debugRoles => _roles;
+
+  @visibleForTesting
+  SheetAtlas? get debugAtlas => _atlas;
+
+  @visibleForTesting
+  int get debugLivePageIndex {
+    final turningAtlas = _roles == null ? null : _atlases[_roles!.turningFront];
+    return turningAtlas != null ? _roles!.revealed : _currentPage;
+  }
 
   @override
   void initState() {
@@ -191,29 +221,41 @@ class _MeshFlipBookState extends State<MeshFlipBook>
       ..addListener(_onSettleTick)
       ..addStatusListener(_onSettleStatus);
     _ticker = createTicker(_onTick);
-    _controller?.attach(widget.pageCount, _currentPage);
-    _controller?.addListener(_onControllerUpdate);
+    _effectiveController.attach(widget.pageCount, _currentPage);
+    _effectiveController.addListener(_onControllerUpdate);
+    if (widget.useVolumeKeys) {
+      VolumeKeyManager.instance.registerClient(this);
+    }
   }
 
   @override
-  void didUpdateWidget(covariant MeshFlipBook old) {
-    super.didUpdateWidget(old);
+  void didUpdateWidget(covariant MeshFlipBook oldWidget) {
+    super.didUpdateWidget(oldWidget);
 
-    if (old.controller != widget.controller) {
-      old.controller?.removeListener(_onControllerUpdate);
-      _controller?.addListener(_onControllerUpdate);
+    if (oldWidget.controller != widget.controller) {
+      final oldEffective = oldWidget.controller ?? _internalController;
+      oldEffective?.removeListener(_onControllerUpdate);
+      _effectiveController.addListener(_onControllerUpdate);
 
       _scheduleSourceReset(reattachController: true);
     }
 
-    final pageCountChanged = old.pageCount != widget.pageCount;
+    if (oldWidget.useVolumeKeys != widget.useVolumeKeys) {
+      if (widget.useVolumeKeys) {
+        VolumeKeyManager.instance.registerClient(this);
+      } else {
+        VolumeKeyManager.instance.unregisterClient(this);
+      }
+    }
+
+    final pageCountChanged = oldWidget.pageCount != widget.pageCount;
     final captureRatioChanged =
-        old.capturePixelRatio != widget.capturePixelRatio;
-    final meshChanged = old.meshColumns != widget.meshColumns;
+        oldWidget.capturePixelRatio != widget.capturePixelRatio;
+    final meshChanged = oldWidget.meshColumns != widget.meshColumns;
     final sourceChanged =
-        old.pageBuilder != widget.pageBuilder ||
-        old.contentVersion != widget.contentVersion;
-    final pageBackChanged = old.pageBackColor != widget.pageBackColor;
+        oldWidget.pageBuilder != widget.pageBuilder ||
+        oldWidget.contentVersion != widget.contentVersion;
+    final pageBackChanged = oldWidget.pageBackColor != widget.pageBackColor;
 
     if (captureRatioChanged ||
         meshChanged ||
@@ -221,17 +263,21 @@ class _MeshFlipBookState extends State<MeshFlipBook>
         pageBackChanged ||
         pageCountChanged) {
       _scheduleSourceReset(
-        reattachController: old.controller != widget.controller,
+        reattachController: oldWidget.controller != widget.controller,
       );
     }
   }
 
   @override
   void dispose() {
-    _controller?.removeListener(_onControllerUpdate);
+    VolumeKeyManager.instance.unregisterClient(this);
+    final effective = widget.controller ?? _internalController;
+    effective?.removeListener(_onControllerUpdate);
+    _internalController?.dispose();
     _ticker?.dispose();
     _settle.dispose();
     _scene.dispose();
+    _renderer.dispose();
     for (final atlas in _atlases.values) {
       atlas.dispose();
     }
@@ -242,14 +288,26 @@ class _MeshFlipBookState extends State<MeshFlipBook>
     super.dispose();
   }
 
+  @override
+  void onVolumeUp() {
+    _effectiveController.flipNext();
+  }
+
+  @override
+  void onVolumeDown() {
+    _effectiveController.flipPrev();
+  }
+
+
   // ── Texture preparation ───────────────────────────────────────────────────
 
   /// Page indices worth having ready: the current page and its neighbours.
   List<int> get _window {
     final indices = <int>[];
-    for (var offset = -1; offset <= 1; offset++) {
-      final index = _currentPage + offset;
-      if (index >= 0 && index < widget.pageCount) indices.add(index);
+    for (final index in [_currentPage, _currentPage + 1, _currentPage - 1]) {
+      if (index >= 0 && index < widget.pageCount && !indices.contains(index)) {
+        indices.add(index);
+      }
     }
     return indices;
   }
@@ -422,11 +480,14 @@ class _MeshFlipBookState extends State<MeshFlipBook>
     });
   }
 
+  bool _isCapturing = false;
+
   /// Captures at most one missing page per pass. This keeps raster readback
   /// work predictable and prevents several builds from starting the same
   /// expensive capture concurrently.
   Future<void> _captureOneTexture() async {
-    if (!mounted ||
+    if (_isCapturing ||
+        !mounted ||
         _sourceResetPending ||
         _pageSize.isEmpty ||
         !_pageSize.width.isFinite ||
@@ -434,8 +495,10 @@ class _MeshFlipBookState extends State<MeshFlipBook>
       return;
     }
 
-    final generation = _captureGeneration;
-    final window = _window;
+    _isCapturing = true;
+    try {
+      final generation = _captureGeneration;
+      final window = _window;
 
     for (final index in window) {
       final key = _keyFor(index);
@@ -471,7 +534,10 @@ class _MeshFlipBookState extends State<MeshFlipBook>
       _prepareTextures();
       return;
     }
+  } finally {
+    _isCapturing = false;
   }
+}
 
   /// A plain paper-coloured image, used for the back of a turning sheet.
   ///
@@ -539,6 +605,7 @@ class _MeshFlipBookState extends State<MeshFlipBook>
       // A completed turn may have advanced the logical page while this sheet
       // was being packed. Keep the next forward/backward starting sheets warm.
       _prepareAdjacentSheets();
+      unawaited(_drainIntents());
     } finally {
       _packing.remove(index);
     }
@@ -556,9 +623,9 @@ class _MeshFlipBookState extends State<MeshFlipBook>
   /// Keeps the sheets needed for both immediate directions, plus the next
   /// forward sheet, warm before the user can ask for it.
   void _prepareAdjacentSheets() {
-    unawaited(_prepareSheet(_currentPage - 1));
     unawaited(_prepareSheet(_currentPage));
     unawaited(_prepareSheet(_currentPage + 1));
+    unawaited(_prepareSheet(_currentPage - 1));
   }
 
   // ── Frame loop ────────────────────────────────────────────────────────────
@@ -635,7 +702,12 @@ class _MeshFlipBookState extends State<MeshFlipBook>
         forward: forward,
       );
       _roles = roles;
-      _smoother.reset(_curlFor(0.0, roles.direction));
+      final initialCurl = _curlFor(0.0, roles.direction);
+      _smoother.reset(initialCurl);
+      final atlas = _atlases[roles.turningFront];
+      if (atlas != null) {
+        _scene.commit(curl: initialCurl, active: true, atlas: atlas);
+      }
       // Normally already packed; this covers the first interaction after a
       // resize, when the capture may not have landed yet.
       unawaited(_prepareSheet(roles.turningFront));
@@ -761,26 +833,32 @@ class _MeshFlipBookState extends State<MeshFlipBook>
 
   bool _draining = false;
 
-  void _onControllerUpdate() => _drainIntents();
+  void _onControllerUpdate() => unawaited(_drainIntents());
 
-  void _drainIntents() {
+  Future<void> _drainIntents() async {
     if (_draining) return;
     _draining = true;
     try {
       final controller = _controller;
       if (controller == null || !mounted) return;
-      if (_dragging || _settle.isAnimating) return;
+      if (_dragging || _settle.isAnimating || _settleCompletionTarget != null) {
+        return;
+      }
 
       while (true) {
         final intent = controller.pendingIntent;
         if (intent == null) return;
-        controller.clearIntent();
+
         final target = intent.targetPage
             .clamp(0, math.max(0, widget.pageCount - 1))
             .toInt();
-        if (target == _currentPage) continue;
+        if (target == _currentPage) {
+          controller.clearIntent();
+          continue;
+        }
 
         if (!intent.animate || !widget.flip.enabled) {
+          controller.clearIntent();
           setState(() => _currentPage = target);
           controller.reportPage(_currentPage);
           _evictDistantSheets();
@@ -790,14 +868,47 @@ class _MeshFlipBookState extends State<MeshFlipBook>
         }
 
         final forward = target > _currentPage;
+        if (forward && _currentPage >= widget.pageCount - 1) {
+          controller.clearIntent();
+          return;
+        }
+        if (!forward && _currentPage <= 0) {
+          controller.clearIntent();
+          return;
+        }
+
         final roles = SheetRoles.forTurn(
           currentPage: _currentPage,
           forward: forward,
         );
+
+        if (!_atlases.containsKey(roles.turningFront)) {
+          _prepareTextures();
+          await _prepareSheet(roles.turningFront);
+          if (!mounted) return;
+          if (!_atlases.containsKey(roles.turningFront)) {
+            return;
+          }
+        }
+
+        controller.clearIntent();
+
+        switch (intent.corner) {
+          case FlipCorner.topRight:
+          case FlipCorner.topLeft:
+            _grabV = 0.15;
+          case FlipCorner.bottomRight:
+          case FlipCorner.bottomLeft:
+            _grabV = 0.85;
+        }
+
         _roles = roles;
-        _grabV = 0.5;
-        _smoother.reset(_curlFor(0.0, roles.direction));
-        unawaited(_prepareSheet(roles.turningFront));
+        final initialCurl = _curlFor(0.0, roles.direction);
+        _smoother.reset(initialCurl);
+        final atlas = _atlases[roles.turningFront];
+        if (atlas != null) {
+          _scene.commit(curl: initialCurl, active: true, atlas: atlas);
+        }
         setState(() {});
         _settleTo(1.0);
         return;
@@ -921,7 +1032,10 @@ class _MeshFlipBookState extends State<MeshFlipBook>
     // While a sheet is turning, what sits under it is the page being revealed.
     // Otherwise it is simply the current page.
     final turningAtlas = roles == null ? null : _atlases[roles.turningFront];
-    final index = turningAtlas != null ? roles!.revealed : _currentPage;
+    final index =
+        (turningAtlas != null && _scene.active)
+            ? roles!.revealed
+            : _currentPage;
     if (index < 0 || index >= widget.pageCount) {
       return ColoredBox(color: widget.pageBackColor);
     }
@@ -951,7 +1065,6 @@ class _CurlPainter extends CustomPainter {
   final PageCurlRenderer renderer;
 
   static const PageCurlShadow _shadow = PageCurlShadow();
-  static const PageCurlGeometry _geometry = PageCurlGeometry();
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -960,20 +1073,21 @@ class _CurlPainter extends CustomPainter {
     if (atlas == null) return;
 
     final curl = scene.curl;
+    final ok = renderer.deformAndProject(mesh, curl, camera: camera);
+    if (!ok) return;
+
     if (showShadow) {
-      // Deform first so the shadow traces the real sheet, then let the
-      // renderer redo it -- the shadow's outline must come from the same
-      // geometry as the page, never from a straight-edged approximation.
-      _geometry.deform(mesh, curl);
-      camera.projectBuffer(
-        mesh.worldPositions,
-        mesh.positions,
-        mesh.vertexCount,
-      );
       _shadow.paint(canvas, mesh, curl, camera: camera);
     }
 
-    renderer.paint(canvas, mesh, curl, atlas, camera: camera);
+    renderer.paint(
+      canvas,
+      mesh,
+      curl,
+      atlas,
+      camera: camera,
+      alreadyDeformed: true,
+    );
 
     if (debugShowMesh) _paintWireframe(canvas);
   }

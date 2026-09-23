@@ -4,10 +4,10 @@ import 'package:flutter/widgets.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import 'package:flip_book/src/flip_book_controller.dart';
-import 'package:flip_book/src/flip_book_widget.dart';
 import 'package:flip_book/src/flip_settings.dart';
+import 'package:flip_book/src/mesh_flip_book.dart';
 
-/// A [FlipBookWidget] that renders pages from a PDF document using `pdfrx`.
+/// A PDF book viewer rendered using [MeshFlipBook] and `pdfrx`.
 class FlipBookPdf extends StatefulWidget {
   const FlipBookPdf({
     super.key,
@@ -26,6 +26,7 @@ class FlipBookPdf extends StatefulWidget {
     this.loadingBuilder,
     this.errorBuilder,
     this.onDocumentLoaded,
+    this.useVolumeKeys = false,
   });
 
   final PdfDocumentRef source;
@@ -57,6 +58,10 @@ class FlipBookPdf extends StatefulWidget {
 
   final void Function(int pageCount)? onDocumentLoaded;
 
+  /// Whether physical volume buttons navigate pages on supported devices (Android).
+  final bool useVolumeKeys;
+
+
   @override
   State<FlipBookPdf> createState() => _FlipBookPdfState();
 }
@@ -66,6 +71,7 @@ class _FlipBookPdfState extends State<FlipBookPdf> {
   Object? _error;
 
   int _loadGeneration = 0;
+  FlipBookController? _internalController;
 
   @override
   void initState() {
@@ -84,6 +90,7 @@ class _FlipBookPdfState extends State<FlipBookPdf> {
 
   @override
   void dispose() {
+    _internalController?.dispose();
     final document = _document;
     _document = null;
 
@@ -140,6 +147,26 @@ class _FlipBookPdfState extends State<FlipBookPdf> {
     }
   }
 
+  Widget _buildIndicator(int page, int pageCount) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xAA000000),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Text(
+          '$page / $pageCount',
+          style: const TextStyle(
+            color: Color(0xFFFFFFFF),
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_error != null) {
@@ -170,31 +197,61 @@ class _FlipBookPdfState extends State<FlipBookPdf> {
     final document = _document!;
     final pageCount = document.pages.length;
 
+    final effectiveController = widget.controller ??
+        (widget.showPageIndicator
+            ? (_internalController ??= FlipBookController())
+            : null);
+
+    final flipBook = MeshFlipBook(
+      pageCount: pageCount,
+      controller: effectiveController,
+      initialPage: widget.initialPage,
+      flip: widget.flipDuration == null
+          ? widget.flip
+          : widget.flip.copyWith(
+              duration: widget.flipDuration,
+            ),
+      backgroundColor: widget.backgroundColor,
+      pageBackColor: widget.pageBackColor,
+      useVolumeKeys: widget.useVolumeKeys,
+      pageBuilder: (
+        context,
+        index,
+        constraints,
+      ) {
+        return _PdfPageContent(
+          document: document,
+          pageIndex: index,
+          constraints: constraints,
+        );
+      },
+    );
+
+    if (!widget.showPageIndicator || effectiveController == null) {
+      return Center(child: flipBook);
+    }
+
     return Center(
-      child: FlipBookWidget(
-        pageCount: pageCount,
-        controller: widget.controller,
-        initialPage: widget.initialPage,
-        flip: widget.flipDuration == null
-            ? widget.flip
-            : widget.flip.copyWith(
-                duration: widget.flipDuration,
+      child: Stack(
+        children: [
+          Positioned.fill(child: flipBook),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 12,
+            child: IgnorePointer(
+              child: Center(
+                child: ListenableBuilder(
+                  listenable: effectiveController,
+                  builder: (context, _) => _buildIndicator(
+                    effectiveController.currentPage + 1,
+                    pageCount,
+                  ),
+                ),
               ),
-        showPageIndicator: false,
-        backgroundColor: widget.backgroundColor,
-        spineColor: widget.spineColor,
-        pageBackColor: widget.pageBackColor,
-        pageBuilder: (
-          context,
-          index,
-          constraints,
-        ) {
-          return _PdfPageContent(
-            document: document,
-            pageIndex: index,
-            constraints: constraints,
-          );
-        },
+            ),
+          ),
+        ],
       ),
     );
   }

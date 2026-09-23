@@ -41,6 +41,7 @@ class FlipBookEpub extends StatefulWidget {
     this.loadingBuilder,
     this.errorBuilder,
     this.onDocumentLoaded,
+    this.useVolumeKeys = false,
   });
 
   /// Where the book comes from.
@@ -72,6 +73,10 @@ class FlipBookEpub extends StatefulWidget {
 
   /// Called once the book is parsed.
   final void Function(EpubDocument document)? onDocumentLoaded;
+
+  /// Whether physical volume buttons navigate pages on supported devices (Android).
+  final bool useVolumeKeys;
+
 
   @override
   State<FlipBookEpub> createState() => _FlipBookEpubState();
@@ -549,6 +554,7 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
                         flip: widget.flip,
                         backgroundColor: settings.theme.background,
                         pageBackColor: settings.theme.background,
+                        useVolumeKeys: widget.useVolumeKeys,
                         pageBuilder: _meshPageBuilder,
                       ),
               ),

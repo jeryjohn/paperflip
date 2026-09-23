@@ -4,6 +4,7 @@ import 'package:flip_book/src/flip_book_controller.dart';
 import 'package:flip_book/src/flip_settings.dart';
 import 'package:flip_book/src/flip_corner.dart';
 import 'package:flip_book/src/page_flip_painter.dart';
+import 'package:flip_book/src/volume/volume_key_manager.dart';
 
 /// Signature for a function that builds a single page widget.
 ///
@@ -34,6 +35,7 @@ typedef FlipPageBuilder = Widget Function(
 ///   },
 /// );
 /// ```
+@Deprecated('Use MeshFlipBook or FlipBook.custom instead. Will be removed in a future release.')
 class FlipBookWidget extends StatefulWidget {
   const FlipBookWidget({
     super.key,
@@ -50,7 +52,9 @@ class FlipBookWidget extends StatefulWidget {
     this.backgroundColor = const Color(0xFFE8E4DC),
     this.spineColor = const Color(0xFFBBB5A8),
     this.pageBackColor = const Color(0xFFF0EEE8),
+    this.useVolumeKeys = false,
   });
+
 
   /// Total number of pages.
   final int pageCount;
@@ -101,12 +105,17 @@ class FlipBookWidget extends StatefulWidget {
   /// Colour shown on the back face of a curling page.
   final Color pageBackColor;
 
+  /// Whether physical volume buttons navigate pages on supported devices (Android).
+  final bool useVolumeKeys;
+
   @override
   State<FlipBookWidget> createState() => _FlipBookWidgetState();
 }
 
 class _FlipBookWidgetState extends State<FlipBookWidget>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin
+    implements VolumeKeyClient {
+
   late int _currentPage;
   late AnimationController _animCtrl;
   late CurvedAnimation _curvedAnim;
@@ -201,6 +210,9 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
 
     _controller?.attach(widget.pageCount, _currentPage);
     _controller?.addListener(_onControllerUpdate);
+    if (widget.useVolumeKeys) {
+      VolumeKeyManager.instance.registerClient(this);
+    }
   }
 
   @override
@@ -222,11 +234,19 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
       }
       _controller?.updatePageCount(widget.pageCount);
     }
+    if (old.useVolumeKeys != widget.useVolumeKeys) {
+      if (widget.useVolumeKeys) {
+        VolumeKeyManager.instance.registerClient(this);
+      } else {
+        VolumeKeyManager.instance.unregisterClient(this);
+      }
+    }
     _syncFlip();
   }
 
   @override
   void dispose() {
+    VolumeKeyManager.instance.unregisterClient(this);
     _controller?.removeListener(_onControllerUpdate);
     // A CurvedAnimation must be disposed before the parent it listens to.
     _settleCurve.dispose();
@@ -235,6 +255,17 @@ class _FlipBookWidgetState extends State<FlipBookWidget>
     _animCtrl.dispose();
     super.dispose();
   }
+
+  @override
+  void onVolumeUp() {
+    _controller?.flipNext();
+  }
+
+  @override
+  void onVolumeDown() {
+    _controller?.flipPrev();
+  }
+
 
   // ── Controller integration ────────────────────────────────────────────────
 

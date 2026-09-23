@@ -1,13 +1,15 @@
+import 'package:flip_book/flip_book.dart';
 import 'package:flutter/material.dart';
 
 import 'common.dart';
 import 'custom.dart';
 import 'pdf.dart';
 
-/// The Home screen where all 3 showcase classes are called:
+/// The Home screen where all showcase classes are called:
 /// 1. [CommonScreen] (EPUB / Reflowable)
 /// 2. [PdfScreen] (PDF Documents)
 /// 3. [CustomScreen] (Custom Widget Pages)
+/// 4. [FlipBookReader] (Full PDF Reader with Zoom & Hardware Volume Keys)
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
 
@@ -50,7 +52,7 @@ class HomeScreen extends StatelessWidget {
           const SizedBox(height: 24),
           const _SectionHeader(
             title: 'Reader Modes',
-            subtitle: 'Choose one of the 3 reader implementations',
+            subtitle: 'Choose one of the 4 reader implementations',
           ),
           const SizedBox(height: 12),
 
@@ -106,7 +108,30 @@ class HomeScreen extends StatelessWidget {
               );
             },
           ),
+          const SizedBox(height: 12),
+
+          // 4. FlipBookReader
+          _ShowcaseCard(
+            key: const Key('home_flip_reader_tile'),
+            title: 'FlipBookReader (Full UI)',
+            subtitle: 'Full screen PDF reader with zoom, page dialog, and hardware volume navigation',
+            badge: 'FULL READER',
+            icon: Icons.chrome_reader_mode_rounded,
+            accentColor: const Color(0xFF6B4C85),
+            onTap: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const FlipBookReader(
+                    title: 'TraceMonkey (Volume Keys Enabled)',
+                    pdfUrl: pdfUrl,
+                    useVolumeKeys: true,
+                  ),
+                ),
+              );
+            },
+          ),
           const SizedBox(height: 28),
+
 
           const _SectionHeader(
             title: 'EPUB Bookshelf',
