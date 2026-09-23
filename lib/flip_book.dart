@@ -22,3 +22,4 @@ export 'src/flip_book_reader.dart';
 export 'src/page_selector_dialog.dart';
 export 'src/flip_corner.dart';
 export 'src/page_flip_painter.dart';
+export 'package:pdfrx/pdfrx.dart';

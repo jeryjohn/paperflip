@@ -3,29 +3,16 @@ import 'package:flutter/foundation.dart';
 import 'package:flip_book/src/rendering/curl_parameters.dart';
 import 'package:flip_book/src/rendering/sheet_atlas.dart';
 
-/// The mutable state the curl painter reads, and the only thing that changes
-/// during a flip.
+/// The mutable state the curl painter reads, and the only state that changes
+/// on the paint-only frame path.
 ///
-/// ## Why this is a [ChangeNotifier] and not widget state
+/// The scene is a [ChangeNotifier] passed to `CustomPaint(repaint: scene)`.
+/// Updating it therefore invalidates painting without rebuilding or relaying
+/// out the page widget tree.
 ///
-/// A page turn updates on every frame. Routing that through `setState` rebuilds
-/// the widget subtree sixty times a second, which in the previous renderer
-/// meant rebuilding three or four full page subtrees per frame — and for a PDF,
-/// re-rasterising the same page twice.
-///
-/// Instead the scene is a plain listenable handed to `CustomPaint(painter:
-/// ...)` as its `repaint` argument. Writing to it marks the render object dirty
-/// for *paint only*: no rebuild, no relayout, and repeated writes within one
-/// frame coalesce into a single repaint. The widget tree is untouched for the
-/// entire duration of a flip.
-///
-/// ## The frame filter
-///
-/// [commit] compares the incoming state against what was last painted and
-/// stays silent when nothing visible changed. A finger held still, the first
-/// tick of a settle that has not moved yet, a clamped overshoot — all of these
-/// would otherwise schedule a full deform/project/sort pass to produce an
-/// identical image.
+/// The scene does not own the [SheetAtlas] it references. Atlas lifetime stays
+/// with the flip-book/cache layer; the scene only keeps the reference required
+/// for the current paint.
 @internal
 class FlipScene extends ChangeNotifier {
   FlipScene();
@@ -37,49 +24,106 @@ class FlipScene extends ChangeNotifier {
   /// The curl state to draw.
   CurlParameters get curl => _curl;
 
-  /// The packed front/back faces of the turning sheet, or `null` when no
-  /// texture is ready. The painter draws nothing in that case rather than
-  /// showing a blank sheet.
+  /// The currently selected turning-sheet atlas, or `null` when unavailable.
   SheetAtlas? get atlas => _atlas;
 
-  /// Whether a turn is in progress. When false the reader shows its live page
-  /// and the curl surface is inert.
+  /// Whether the curl painter should draw the turning sheet.
   bool get active => _active;
 
+  // Last state actually published to listeners. This keeps redundant controller
+  // ticks and smoothing updates from scheduling an unnecessary paint.
   CurlParameters _painted = CurlParameters.rest;
   SheetAtlas? _paintedAtlas;
   bool _paintedActive = false;
 
-  /// Publishes new state, notifying only if it would change the image.
+  static const double _paintEpsilon = 1e-4;
+
+  /// Publishes a new frame state.
+  ///
+  /// When [active] is false the atlas is intentionally discarded from the scene
+  /// state. This prevents a stale/disposed atlas from remaining visible to a
+  /// later paint after a turn has completed or the texture generation changes.
+  ///
+  /// The caller retains ownership of [atlas].
   void commit({
     required CurlParameters curl,
     required bool active,
     SheetAtlas? atlas,
   }) {
+    final effectiveAtlas = active ? atlas : null;
+
+    final unchanged =
+        _paintedActive == active &&
+        identical(_paintedAtlas, effectiveAtlas) &&
+        (!active || _painted.distanceTo(curl) < _paintEpsilon);
+
     _curl = curl;
     _active = active;
-    _atlas = atlas;
+    _atlas = effectiveAtlas;
 
-    final unchanged = _paintedActive == active &&
-        identical(_paintedAtlas, atlas) &&
-        (!active || _painted.distanceTo(curl) < 1e-4);
     if (unchanged) return;
 
     _painted = curl;
-    _paintedAtlas = atlas;
+    _paintedAtlas = effectiveAtlas;
     _paintedActive = active;
+
     notifyListeners();
   }
 
-  /// Returns the sheet to rest without drawing a curl.
-  void rest() => commit(curl: CurlParameters.rest, active: false);
+  /// Publishes a texture change without changing the geometric state.
+  ///
+  /// Useful when an atlas finishes preparing while a turn is already active:
+  /// the mesh should begin painting the exact same curl state with the newly
+  /// available texture.
+  void commitAtlas(SheetAtlas? atlas) {
+    if (!_active) return;
+    if (identical(_atlas, atlas) && identical(_paintedAtlas, atlas)) return;
+
+    _atlas = atlas;
+    _paintedAtlas = atlas;
+    _paintedActive = true;
+    notifyListeners();
+  }
+
+  /// Returns the scene to rest.
+  ///
+  /// The atlas reference is removed from the scene immediately; ownership and
+  /// disposal of the atlas remain with the caller.
+  void rest() {
+    commit(curl: CurlParameters.rest, active: false, atlas: null);
+  }
+
+  /// Clears the currently referenced atlas while keeping the scene inactive.
+  ///
+  /// This is useful when a capture/resize/content generation invalidates all
+  /// prepared textures before the next frame is ready.
+  void invalidateAtlas() {
+    if (_atlas == null && _paintedAtlas == null) return;
+
+    _atlas = null;
+    _paintedAtlas = null;
+    _active = false;
+    _paintedActive = false;
+    _curl = CurlParameters.rest;
+    _painted = CurlParameters.rest;
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    // The scene never owns atlas resources, so disposal only releases the
+    // notifier itself and drops Dart references.
+    _atlas = null;
+    _paintedAtlas = null;
+    super.dispose();
+  }
 }
 
 /// Everything the flip needs to know about which pages are involved.
 ///
-/// A turn always moves one physical sheet. Naming the roles explicitly — rather
-/// than deriving them inline at three different call sites, as the previous
-/// renderer did — is what keeps the spread and portrait paths in agreement.
+/// A turn always moves one physical sheet. Naming these roles explicitly keeps
+/// portrait and spread logic consistent and makes the renderer independent of
+/// document type.
 @immutable
 @internal
 class SheetRoles {
@@ -89,40 +133,45 @@ class SheetRoles {
     required this.direction,
   });
 
-  /// The page on the front of the sheet being turned.
+  /// Page currently on the front of the physical sheet being moved.
   final int turningFront;
 
-  /// The page exposed underneath as the sheet lifts away.
+  /// Page exposed underneath as the sheet moves away.
   final int revealed;
 
   /// `1` forward, `-1` backward.
   final int direction;
 
-  /// Resolves the roles for a turn away from [currentPage].
+  /// Resolves roles for a turn away from [currentPage].
   ///
-  /// A forward turn lifts the current page to reveal the next. A backward turn
-  /// brings the previous page back over the current one, so the sheet being
-  /// moved is the *previous* one and what it reveals is the current page.
+  /// Forward: lift the current page and reveal the next.
+  ///
+  /// Backward: bring the previous page over the current page.
   factory SheetRoles.forTurn({
     required int currentPage,
     required bool forward,
   }) {
-    if (forward) {
-      return SheetRoles(
-        turningFront: currentPage,
-        revealed: currentPage + 1,
-        direction: 1,
-      );
-    }
-    return SheetRoles(
-      turningFront: currentPage - 1,
-      revealed: currentPage,
-      direction: -1,
-    );
+    return forward
+        ? SheetRoles(
+            turningFront: currentPage,
+            revealed: currentPage + 1,
+            direction: 1,
+          )
+        : SheetRoles(
+            turningFront: currentPage - 1,
+            revealed: currentPage,
+            direction: -1,
+          );
   }
 
-  /// The page index the book lands on when this turn completes.
+  /// Page index on which the book lands when the turn completes.
   int get destination => direction > 0 ? revealed : turningFront;
+
+  /// Whether the role data refers to a forward turn.
+  bool get isForward => direction > 0;
+
+  /// Whether the role data refers to a backward turn.
+  bool get isBackward => direction < 0;
 
   @override
   bool operator ==(Object other) =>
@@ -137,5 +186,6 @@ class SheetRoles {
 
   @override
   String toString() =>
-      'SheetRoles(front: $turningFront, revealed: $revealed, dir: $direction)';
+      'SheetRoles(front: $turningFront, '
+      'revealed: $revealed, dir: $direction)';
 }

@@ -10,25 +10,17 @@ import 'package:flip_book/src/pages/page_texture.dart';
 ///
 /// ## Why this has to exist
 ///
-/// A turning sheet shows its front and its back at the same time: once the
-/// curl passes vertical, part of the mesh faces away and must sample the back
-/// page. Those triangles are *interleaved* with front-facing ones in draw
-/// order, because draw order is decided by depth and the sheet folds over
-/// itself.
+/// A turning sheet can expose both faces during one continuous curl. Those
+/// triangles are interleaved by depth because the page folds over itself.
 ///
-/// `Canvas.drawVertices` samples exactly one shader, and a shader wraps exactly
-/// one image. Drawing all front triangles and then all back triangles would
-/// need two calls — and two calls cannot interleave, so the fold would
-/// visibly draw in the wrong order wherever the sheet overlaps itself.
+/// `Canvas.drawVertices` uses one paint/shader for a draw call. Packing the
+/// front and back into one image lets the renderer draw the entire turning
+/// sheet in one depth-sorted pass while the texture coordinates select the
+/// visible face.
 ///
-/// Packing both faces into one image makes the whole sheet one draw call with
-/// one shader, and lets the triangle order be purely a function of depth. Each
-/// triangle picks its face by which half of the image its texture coordinates
-/// point at.
-///
-/// This is *not* the multi-page atlas the implementation plan defers: it is two
-/// cells, built once per sheet, and the renderer works without it (a sheet with
-/// no back face skips it entirely).
+/// This is intentionally a *two-face sheet atlas*, not a whole-book atlas.
+/// The page source remains responsible for producing individual
+/// [PageTexture]s; this class only prepares the currently turning sheet.
 @immutable
 @internal
 class SheetAtlas {
@@ -37,39 +29,46 @@ class SheetAtlas {
     required this.frontRegion,
     required this.backRegion,
     required this.logicalSize,
+    required this.ownsImage,
   });
 
-  /// One image holding the front face in its left half and the back in its
-  /// right.
+  /// One image containing the front face on the left and the back face on the
+  /// right, unless this is a single-face atlas.
   final ui.Image image;
 
-  /// Where the front face lives, in [image] pixel space.
+  /// Where the front face lives, in atlas-image pixel space.
   final Rect frontRegion;
 
-  /// Where the back face lives, in [image] pixel space. Identical to
-  /// [frontRegion] when the sheet has no distinct back.
+  /// Where the back face lives, in atlas-image pixel space.
+  ///
+  /// For a single-face atlas this is exactly [frontRegion].
   final Rect backRegion;
 
-  /// The logical size of one face.
+  /// The logical size of the sheet face.
   final Size logicalSize;
 
-  /// Whether both faces resolve to the same pixels.
+  /// Whether this atlas owns [image].
+  ///
+  /// A single-face atlas borrows the front [PageTexture]'s image, so it must
+  /// not dispose it. A packed two-face atlas owns its newly-created image.
+  final bool ownsImage;
+
+  /// Whether both faces point at the same region of the atlas.
   bool get isSingleFace => frontRegion == backRegion;
 
   /// Builds an atlas from a sheet's faces.
   ///
-  /// When [faces] has no back, the front texture is used directly with no
-  /// copy and no extra memory — [isSingleFace] is then true and both regions
-  /// address the same pixels.
+  /// When there is no distinct back face, the front image is borrowed directly
+  /// with no raster copy. This keeps the common/idle preparation path cheap.
   ///
-  /// A one-pixel gutter separates the two cells. Bilinear sampling reads
-  /// slightly outside a triangle's own texture coordinates at cell edges, and
-  /// without the gutter the front face would bleed a sliver of the back face
-  /// along the fold — a thin, hard-to-diagnose seam exactly where the eye is
-  /// already looking.
+  /// When a back face exists, the two source regions are copied into a single
+  /// atlas image with a small gutter between them. The gutter prevents linear
+  /// filtering from sampling the neighbouring face at the cell boundary.
   static Future<SheetAtlas> pack(PageFaceSet faces) async {
     final front = faces.front;
     final back = faces.back;
+
+    _validateTexture(front, name: 'front');
 
     if (back == null) {
       return SheetAtlas._(
@@ -77,48 +76,145 @@ class SheetAtlas {
         frontRegion: front.region,
         backRegion: front.region,
         logicalSize: front.logicalSize,
+        ownsImage: false,
       );
     }
 
-    const gutter = 1.0;
+    _validateTexture(back, name: 'back');
+
+    if (front.logicalSize != back.logicalSize) {
+      throw StateError(
+        'Cannot pack sheet faces with different logical sizes: '
+        '${front.logicalSize} vs ${back.logicalSize}.',
+      );
+    }
+
+    // The source textures normally have the same capture pixel ratio. We still
+    // handle differing source dimensions safely by fitting both into the
+    // larger destination cell. The renderer samples in atlas pixel space, so
+    // both faces retain the same logical page bounds.
+    const gutter = 2.0;
     final cellW = math.max(front.region.width, back.region.width);
     final cellH = math.max(front.region.height, back.region.height);
+
+    if (cellW <= 0 || cellH <= 0 || !cellW.isFinite || !cellH.isFinite) {
+      throw StateError(
+        'Cannot pack empty or invalid page regions: '
+        'front=${front.region}, back=${back.region}.',
+      );
+    }
+
     final totalW = (cellW * 2 + gutter).ceil();
     final totalH = cellH.ceil();
 
+    if (totalW <= 0 || totalH <= 0) {
+      throw StateError(
+        'Calculated an invalid atlas size: ${totalW}x$totalH.',
+      );
+    }
+
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
-    final paint = Paint()..filterQuality = FilterQuality.high;
+
+    final paint = Paint()
+      ..filterQuality = FilterQuality.high
+      ..isAntiAlias = false;
 
     final frontRegion = Rect.fromLTWH(0, 0, cellW, cellH);
     final backRegion = Rect.fromLTWH(cellW + gutter, 0, cellW, cellH);
 
-    canvas.drawImageRect(front.image, front.region, frontRegion, paint);
-    canvas.drawImageRect(back.image, back.region, backRegion, paint);
-
-    final picture = recorder.endRecording();
     try {
-      final image = await picture.toImage(totalW, totalH);
-      return SheetAtlas._(
-        image: image,
-        frontRegion: frontRegion,
-        backRegion: backRegion,
-        logicalSize: front.logicalSize,
+      _drawIntoCell(
+        canvas,
+        source: front,
+        destination: frontRegion,
+        paint: paint,
       );
-    } finally {
-      picture.dispose();
+      _drawIntoCell(
+        canvas,
+        source: back,
+        destination: backRegion,
+        paint: paint,
+      );
+
+      final picture = recorder.endRecording();
+      try {
+        final image = await picture.toImage(totalW, totalH);
+
+        return SheetAtlas._(
+          image: image,
+          frontRegion: frontRegion,
+          backRegion: backRegion,
+          logicalSize: front.logicalSize,
+          ownsImage: true,
+        );
+      } finally {
+        picture.dispose();
+      }
+    } catch (_) {
+      // The recorder is only a Dart-side recording object. Make sure it is
+      // ended on failure too so this path does not retain resources longer
+      // than necessary.
+      try {
+        recorder.endRecording().dispose();
+      } catch (_) {
+        // There is nothing useful to recover here; the original error is more
+        // informative to the caller.
+      }
+      rethrow;
     }
   }
 
-  /// Releases the packed image.
+  /// Releases the atlas image when this object owns it.
   ///
-  /// Skipped when [isSingleFace], since the image is then owned by the caller's
-  /// front [PageTexture] and disposing it here would be a double free.
+  /// Single-face atlases borrow the front texture's image and therefore leave
+  /// disposal to [PageTexture].
   void dispose() {
-    if (!isSingleFace && !image.debugDisposed) image.dispose();
+    if (ownsImage && !image.debugDisposed) {
+      image.dispose();
+    }
   }
 
   @override
   String toString() => 'SheetAtlas(${image.width}x${image.height}, '
-      'single: $isSingleFace)';
+      'single: $isSingleFace, ownsImage: $ownsImage)';
+
+  static void _validateTexture(
+    PageTexture texture, {
+    required String name,
+  }) {
+    if (texture.isDisposed || texture.image.debugDisposed) {
+      throw StateError('Cannot pack disposed $name PageTexture.');
+    }
+
+    if (!texture.hasValidRegion) {
+      throw StateError(
+        'Cannot pack $name PageTexture with invalid region: '
+        '${texture.region}.',
+      );
+    }
+
+    if (texture.logicalSize.isEmpty ||
+        !texture.logicalSize.width.isFinite ||
+        !texture.logicalSize.height.isFinite) {
+      throw StateError(
+        'Cannot pack $name PageTexture with invalid logical size: '
+        '${texture.logicalSize}.',
+      );
+    }
+  }
+
+  static void _drawIntoCell(
+    Canvas canvas, {
+    required PageTexture source,
+    required Rect destination,
+    required Paint paint,
+  }) {
+    canvas.drawImageRect(
+      source.image,
+      source.region,
+      destination,
+      paint,
+    );
+  }
 }

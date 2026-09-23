@@ -4,10 +4,9 @@ import 'package:meta/meta.dart';
 
 /// The complete geometric state of a page turn.
 ///
-/// Deliberately *not* just `progress`. Two gestures that have travelled the
-/// same horizontal distance look different if the user grabbed the page at the
-/// top rather than the middle, and collapsing that away is what makes a page
-/// turn read as an animation rather than as paper. [grabV] is what carries it.
+/// Deliberately not just `progress`: two gestures that have travelled the same
+/// horizontal distance can look different when the page is grabbed at
+/// different heights. [grabV] carries that physical information into the curl.
 @immutable
 @internal
 class CurlParameters {
@@ -21,76 +20,79 @@ class CurlParameters {
     this.droop = defaultDroop,
   });
 
-  /// Flat, un-turned page.
+  /// Flat, unturned page.
   static const CurlParameters rest = CurlParameters(progress: 0);
 
-  /// Peak bend angle at mid-turn, in radians.
+  /// Peak wrap angle at the middle of the turn, in radians.
   ///
-  /// This is the total angle the sheet wraps through, so the fold radius is
-  /// `halfPageWidth / bendAmount`. Larger means a tighter curl.
+  /// This controls the actual curl radius. Rotation of the finished sheet is
+  /// handled separately by the geometry so a near-flat final state can still
+  /// be nearly 180 degrees around its spine without a geometric snap.
   static const double defaultBendAmount = 1.32;
 
-  /// Peak per-row shear of the fold angle, in radians. Makes the crease run
-  /// diagonally for a corner grab instead of staying parallel to the spine.
+  /// Legacy/public tuning value retained for API compatibility.
+  ///
+  /// The current cone formulation gets the physically meaningful diagonal
+  /// variation from [conicity], which is derived from [grabV]. A per-row angle
+  /// shear would break the developable/isometric surface, so this value is not
+  /// applied directly by [PageCurlGeometry].
   static const double defaultTiltAmount = 0.30;
 
-  /// Peak droop of the free corner, as a fraction of page height.
+  /// Peak free-corner droop as a fraction of page height.
   static const double defaultDroop = 0.06;
 
-  /// How far through the turn, `0` (flat) to `1` (fully turned).
+  /// How far through the turn, `0` to `1`.
   final double progress;
 
-  /// Where the sheet is held, as a fraction of page height: `0` is the top
-  /// edge, `1` the bottom, `0.5` the middle.
-  ///
-  /// This drives both the fold's diagonal tilt and [conicity]'s sign, and so
-  /// is the single parameter that distinguishes a corner pull from a
-  /// centre-edge pull.
+  /// Vertical position where the user grabbed the sheet: `0` top, `1` bottom.
   final double grabV;
 
-  /// `1` for a forward turn, `-1` for a backward one.
+  /// `1` for a forward turn, `-1` for a backward turn.
   final int direction;
 
-  /// Peak wrap angle in radians. See [defaultBendAmount].
+  /// Peak wrap angle in radians.
   final double bendAmount;
 
-  /// Peak fold-angle shear in radians. See [defaultTiltAmount].
+  /// Retained as a public compatibility/tuning field.
+  ///
+  /// See [defaultTiltAmount] for why the current physical cone implementation
+  /// does not turn this into a non-rigid per-row shear.
   final double tiltAmount;
 
-  /// How cone-like the curl is, `-1` to `1`.
+  /// Cone strength, `-1` to `1`.
   ///
-  /// `0` is an exact cylinder — the fold radius is constant down the whole
-  /// spine. Non-zero makes the radius vary along the spine, which is what a
-  /// cone is: one end of the fold curls tighter than the other. The sign
-  /// selects which end, so a top grab and a bottom grab produce mirrored
-  /// cones and a centre grab produces the cylinder between them.
-  ///
-  /// Derived from [grabV] by [resolveConicity] rather than set directly.
+  /// `0` is an exact cylinder. Positive/negative values make opposite ends of
+  /// the page curl tighter.
   final double conicity;
 
-  /// Free-corner sag as a fraction of page height. Paper has weight; a lifted
-  /// corner falls away from the held row.
+  /// Free-corner sag as a fraction of page height.
   final double droop;
 
-  /// Whether the page is flat, and so can skip the whole deform/project
-  /// pipeline and draw as a plain rectangle.
-  bool get isFlat => progress <= 0.0 || progress >= 1.0;
+  /// Whether the state is the exact initial flat state.
+  ///
+  /// Progress `1` is intentionally **not** considered flat here. At the end of
+  /// a turn the sheet's curvature approaches zero, but it is also rotated toward
+  /// the destination side of the book. The geometry must render that rigidly
+  /// rotated limit until the settle completes and the live destination page is
+  /// handed back.
+  bool get isFlat => progress <= 0.0;
 
-  /// Maps a grab position to a cone strength.
+  /// Maps a vertical grab position to cone strength.
   ///
-  /// A grab at the vertical centre gives a cylinder; grabs toward either edge
-  /// give increasingly conical curls of opposite sign. The mapping is linear
-  /// and passes through zero at the centre, so it is continuous — there is no
-  /// point at which the geometry switches models.
-  ///
-  /// [strength] scales the whole effect; `0` pins the curl to a pure cylinder
-  /// regardless of where the page is held.
+  /// Middle grab => cylinder. Top/bottom grabs => opposite cone directions.
   static double resolveConicity(double grabV, {double strength = 0.85}) {
-    final v = grabV.isFinite ? grabV.clamp(0.0, 1.0) : 0.5;
-    return ((0.5 - v) * 2.0 * strength).clamp(-1.0, 1.0);
+    final v = _finiteClamp(grabV, 0.0, 1.0);
+
+    if (!strength.isFinite) {
+      strength = 0.85;
+    }
+
+    final boundedStrength = strength.clamp(0.0, 1.0).toDouble();
+
+    return ((0.5 - v) * 2.0 * boundedStrength).clamp(-1.0, 1.0).toDouble();
   }
 
-  /// Builds the parameters for a gesture, resolving [conicity] from [grabV].
+  /// Builds parameters for a user gesture.
   factory CurlParameters.forGesture({
     required double progress,
     required double grabV,
@@ -101,13 +103,13 @@ class CurlParameters {
     double conicStrength = 0.85,
   }) {
     return CurlParameters(
-      progress: progress.clamp(0.0, 1.0),
-      grabV: grabV.clamp(0.0, 1.0),
+      progress: _finiteClamp(progress, 0.0, 1.0),
+      grabV: _finiteClamp(grabV, 0.0, 1.0),
       direction: direction >= 0 ? 1 : -1,
-      bendAmount: bendAmount,
-      tiltAmount: tiltAmount,
+      bendAmount: _finiteNonNegative(bendAmount),
+      tiltAmount: _finiteNonNegative(tiltAmount),
       conicity: resolveConicity(grabV, strength: conicStrength),
-      droop: droop,
+      droop: _finiteNonNegative(droop),
     );
   }
 
@@ -119,25 +121,25 @@ class CurlParameters {
     double? tiltAmount,
     double? conicity,
     double? droop,
-  }) =>
-      CurlParameters(
-        progress: progress ?? this.progress,
-        grabV: grabV ?? this.grabV,
-        direction: direction ?? this.direction,
-        bendAmount: bendAmount ?? this.bendAmount,
-        tiltAmount: tiltAmount ?? this.tiltAmount,
-        conicity: conicity ?? this.conicity,
-        droop: droop ?? this.droop,
-      );
+  }) => CurlParameters(
+    progress: progress ?? this.progress,
+    grabV: grabV ?? this.grabV,
+    direction: direction ?? this.direction,
+    bendAmount: bendAmount ?? this.bendAmount,
+    tiltAmount: tiltAmount ?? this.tiltAmount,
+    conicity: conicity ?? this.conicity,
+    droop: droop ?? this.droop,
+  );
 
-  /// Linear interpolation, used by the temporal smoother.
+  /// Linear interpolation of the animated geometric fields.
   ///
-  /// [direction] is not interpolated — a half-forward, half-backward turn is
-  /// meaningless — so it snaps to [b]'s value.
+  /// Direction is discrete and therefore follows [b].
   static CurlParameters lerp(CurlParameters a, CurlParameters b, double t) {
     if (t <= 0) return a;
     if (t >= 1) return b;
+
     double mix(double x, double y) => x + (y - x) * t;
+
     return CurlParameters(
       progress: mix(a.progress, b.progress),
       grabV: mix(a.grabV, b.grabV),
@@ -149,18 +151,16 @@ class CurlParameters {
     );
   }
 
-  /// Largest absolute difference across the animated fields.
-  ///
-  /// Used both to decide when the smoother has converged and to skip a repaint
-  /// when nothing visible has changed.
+  /// Largest absolute difference across animated fields.
   double distanceTo(CurlParameters other) {
-    var d = (progress - other.progress).abs();
-    d = math.max(d, (grabV - other.grabV).abs());
-    d = math.max(d, (conicity - other.conicity).abs());
-    d = math.max(d, (bendAmount - other.bendAmount).abs());
-    d = math.max(d, (tiltAmount - other.tiltAmount).abs());
-    d = math.max(d, (droop - other.droop).abs());
-    return direction == other.direction ? d : double.infinity;
+    var distance = (progress - other.progress).abs();
+    distance = math.max(distance, (grabV - other.grabV).abs());
+    distance = math.max(distance, (conicity - other.conicity).abs());
+    distance = math.max(distance, (bendAmount - other.bendAmount).abs());
+    distance = math.max(distance, (tiltAmount - other.tiltAmount).abs());
+    distance = math.max(distance, (droop - other.droop).abs());
+
+    return direction == other.direction ? distance : double.infinity;
   }
 
   @override
@@ -177,122 +177,131 @@ class CurlParameters {
 
   @override
   int get hashCode => Object.hash(
-        progress,
-        grabV,
-        direction,
-        bendAmount,
-        tiltAmount,
-        conicity,
-        droop,
-      );
+    progress,
+    grabV,
+    direction,
+    bendAmount,
+    tiltAmount,
+    conicity,
+    droop,
+  );
 
   @override
-  String toString() => 'CurlParameters(t: ${progress.toStringAsFixed(3)}, '
-      'grabV: ${grabV.toStringAsFixed(2)}, dir: $direction, '
+  String toString() =>
+      'CurlParameters(t: ${progress.toStringAsFixed(3)}, '
+      'grabV: ${grabV.toStringAsFixed(2)}, '
+      'dir: $direction, '
       'conicity: ${conicity.toStringAsFixed(2)})';
+
+  static double _finiteClamp(double value, double min, double max) {
+    if (!value.isFinite) return min;
+    return value.clamp(min, max).toDouble();
+  }
+
+  static double _finiteNonNegative(double value) {
+    if (!value.isFinite || value <= 0) return 0.0;
+    return value;
+  }
 }
 
-/// Keeps the displayed curl continuous when pointer input is not.
+/// Keeps the displayed curl continuous when pointer input and display frames
+/// do not arrive at the same cadence.
 ///
-/// Pointer events and display frames are independent. A fast finger can travel
-/// a long way between two paints, and rendering each raw sample directly makes
-/// the fold jump. But over-correcting is worse than the jump: a page that
-/// trails the finger by 50 ms feels disconnected in a way that a small hitch
-/// does not.
-///
-/// So this is a *response limiter*, not a filter. It is deliberately:
-///
-///   * **adaptive** — small deltas pass through essentially untouched, and only
-///     a delta large enough to read as a jump is damped at all;
-///   * **dt-aware** — the catch-up is per unit time, so it behaves identically
-///     at 60, 90 and 120 Hz;
-///   * **bounded** — [maxLagSeconds] caps how far behind the target the
-///     displayed value may ever fall, so lag cannot accumulate.
+/// This is intentionally a response limiter rather than a heavy filter:
+/// ordinary small finger movements follow immediately; only larger jumps are
+/// eased over a few frames. The approach is time-based, so the feel remains
+/// similar at 60, 90, and 120 Hz.
 @internal
 class CurlSmoother {
   CurlSmoother({
     this.responseRate = 26.0,
     this.passThroughDelta = 0.012,
     this.maxLagSeconds = 0.045,
-  });
+  }) : assert(responseRate > 0),
+       assert(passThroughDelta >= 0),
+       assert(maxLagSeconds > 0);
 
-  /// Exponential catch-up rate, per second. Higher is more direct.
-  ///
-  /// At 26/s, a 60 Hz frame closes ~35% of the remaining gap, which settles a
-  /// jump in ~3 frames (≈50 ms) while leaving normal motion untouched.
+  /// Exponential catch-up rate, per second.
   final double responseRate;
 
-  /// Deltas at or below this pass straight through, undamped.
-  ///
-  /// A normal drag moves the curl by well under this per frame, so ordinary
-  /// finger-following has *no* smoothing applied at all and therefore no lag.
+  /// Deltas below this threshold follow directly.
   final double passThroughDelta;
 
-  /// Hard ceiling on how far behind the target the display may fall.
+  /// Maximum amount of temporal lag permitted by the limiter.
   final double maxLagSeconds;
 
   CurlParameters _displayed = CurlParameters.rest;
   CurlParameters _target = CurlParameters.rest;
 
-  /// What the renderer should draw this frame.
+  /// What the renderer should draw now.
   CurlParameters get displayed => _displayed;
 
-  /// Where the gesture actually is.
+  /// Where the gesture/programmatic animation is trying to go.
   CurlParameters get target => _target;
 
-  /// Whether the display has caught up with the target.
+  /// Whether the visual state has converged.
   bool get isSettled => _displayed.distanceTo(_target) < 1e-4;
 
-  /// Records where the gesture now is. Cheap; safe to call per pointer event.
-  void setTarget(CurlParameters value) => _target = value;
+  /// Records the latest target cheaply.
+  void setTarget(CurlParameters value) {
+    _target = value;
+  }
 
-  /// Snaps both states to [value], bypassing smoothing entirely.
+  /// Snaps both states to [value].
   ///
-  /// Used when continuity would be wrong rather than desirable: the start of a
-  /// new gesture, a committed page, a programmatic jump, or a resize.
+  /// Used at the beginning of a new interaction, after a committed page, and
+  /// for programmatic jumps where interpolation would create a discontinuity.
   void reset(CurlParameters value) {
     _displayed = value;
     _target = value;
   }
 
-  /// Advances [displayed] toward [target] by one frame of [dt] seconds.
+  /// Advances the displayed state toward the target.
   ///
-  /// Returns `true` when the displayed value changed and a repaint is needed.
+  /// Returns true when a visible repaint is needed.
   bool advance(double dt) {
     final target = _target;
     final current = _displayed;
 
-    // A direction change is a new gesture, not something to interpolate
-    // through — `distanceTo` reports infinity for it.
+    // Direction is discrete. Crossing through zero between opposite directions
+    // would invent a physically meaningless half-forward/half-backward state.
     if (current.direction != target.direction) {
       _displayed = target;
       return true;
     }
 
     final delta = current.distanceTo(target);
-    if (delta < 1e-5) return false;
+    if (!delta.isFinite || delta < 1e-5) {
+      if (delta < 1e-5) {
+        _displayed = target;
+      }
+      return false;
+    }
 
-    // Small movement: follow exactly. This is the common case, and it is why
-    // there is no perceptible lag during an ordinary drag.
+    // Ordinary dragging is direct.
     if (delta <= passThroughDelta) {
       _displayed = target;
       return true;
     }
 
-    final step = dt.isFinite && dt > 0 ? dt.clamp(0.0, 0.1) : 1 / 60;
+    final step = dt.isFinite && dt > 0
+        ? dt.clamp(0.0, 0.1).toDouble()
+        : 1.0 / 60.0;
 
-    // Frame-rate independent exponential approach: the fraction of the gap
-    // closed per second is constant, so the feel does not change with refresh
-    // rate.
-    var t = 1.0 - math.exp(-responseRate * step);
+    var interpolation = 1.0 - math.exp(-responseRate * step);
 
-    // Never lag further behind than maxLagSeconds' worth of travel. Without
-    // this the exponential tail lets a sustained fast drag accumulate an
-    // unbounded offset, which reads as the page sticking to the finger late.
-    final maxLag = delta * (step / maxLagSeconds);
-    if (maxLag < 1.0) t = math.max(t, maxLag);
+    // Bound the temporal lag. A sustained fast drag therefore cannot slowly
+    // build a larger and larger gap between the finger and the page.
+    final lagFraction = (step / maxLagSeconds).clamp(0.0, 1.0).toDouble();
 
-    _displayed = CurlParameters.lerp(current, target, t.clamp(0.0, 1.0));
+    interpolation = math.max(interpolation, lagFraction);
+
+    _displayed = CurlParameters.lerp(
+      current,
+      target,
+      interpolation.clamp(0.0, 1.0),
+    );
+
     return true;
   }
 }

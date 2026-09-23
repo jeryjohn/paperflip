@@ -6,265 +6,415 @@ import 'package:flutter/foundation.dart';
 import 'package:flip_book/src/flip_corner.dart';
 import 'package:flip_book/src/flip_settings.dart';
 
-/// Controls a [FlipBookWidget] or [FlipBookPdf] programmatically.
+/// Controls a flip-book programmatically.
 ///
 /// Attach via the `controller` parameter. Dispose when no longer needed.
 ///
-/// ```dart
-/// final controller = FlipBookController();
-///
-/// // Animated flips
-/// controller.flipNext();
-/// controller.flipPrev(corner: FlipCorner.bottomLeft);
-///
-/// // Jump to page 5 with intermediate animations
-/// controller.goToPage(5);
-///
-/// // Instant jump (no animation)
-/// controller.goToPage(5, animate: false);
-///
-/// // Non-animated page step
-/// controller.nextPage();
-/// controller.previousPage();
-/// ```
+/// The controller stores navigation *intents* rather than trying to perform
+/// animations itself. This keeps the document widget/rendering engine in
+/// control of timing while allowing rapid API calls to be queued safely.
 class FlipBookController extends ChangeNotifier {
   int _currentPage = 0;
   int _pageCount = 0;
   bool _isAnimating = false;
 
-  /// The zero-based index of the currently displayed page (or left-page of a spread).
+  /// Zero-based page currently committed by the reader.
   int get currentPage => _currentPage;
 
-  /// Total number of pages.
+  /// Total number of pages in the attached reader.
   int get pageCount => _pageCount;
 
-  /// Whether a flip animation is currently in progress.
+  /// Whether the reader is currently animating a turn.
   bool get isAnimating => _isAnimating;
 
-  // Internal state subscribed to by the widget.
-  //
-  // Intents are queued rather than held in a single slot: a multi-page
-  // [goToPage] enqueues one intent per page and the widget consumes only one
-  // at a time (it must wait for each flip animation to finish). A single slot
-  // silently dropped every intent after the first.
-  final Queue<_FlipIntent> _queue = Queue<_FlipIntent>();
+  // Navigation intents are queued instead of stored in a single slot. A
+  // multi-page journey therefore survives rapid button presses.
+  final Queue<FlipIntent> _queue = Queue<FlipIntent>();
 
-  /// The next intent awaiting consumption, or `null` when none is queued.
-  _FlipIntent? get pendingIntent => _queue.isEmpty ? null : _queue.first;
+  /// The next intent awaiting consumption, or `null`.
+  FlipIntent? get pendingIntent => _queue.isEmpty ? null : _queue.first;
 
-  /// Whether any intents are still waiting to be consumed.
+  /// Whether any navigation intents remain queued.
   bool get hasPendingIntents => _queue.isNotEmpty;
 
-  /// Called by the widget once it has consumed the pending intent.
+  /// Called by the reader when it consumes the next intent.
   ///
-  /// The widget dequeues an intent when it *starts* the flip, so the target of
-  /// that in-flight flip is retained here; otherwise [_projectedPage] would
-  /// see an empty queue and a stale [currentPage] while the flip runs.
+  /// The target is retained as [_inFlightTarget] until the reader reports the
+  /// committed page, so projected navigation remains correct during the
+  /// animation itself.
   void clearIntent() {
     if (_queue.isEmpty) return;
+
     final target = _queue.removeFirst().targetPage;
     _inFlightTarget = target == _currentPage ? null : target;
   }
 
-  /// Called by the widget to initialise / update the page count.
+  /// Attaches the controller to a new reader.
+  ///
+  /// Attaching starts a new navigation context, so intents from the previous
+  /// document are discarded.
   void attach(int pageCount, int initialPage) {
-    _pageCount = pageCount;
-    _currentPage = initialPage.clamp(0, pageCount - 1);
-    // Intents queued against a previous book are meaningless now.
+    final safeCount = _maxInt(pageCount, 0);
+    _pageCount = safeCount;
+
+    _currentPage = safeCount == 0
+        ? 0
+        : initialPage.clamp(0, safeCount - 1).toInt();
+
+    final pending = _queue.isNotEmpty ? _queue.first : null;
     _queue.clear();
+    if (pending != null && safeCount > 0) {
+      _queue.add(
+        pending.animate
+            ? FlipIntent.animated(
+                targetPage: pending.targetPage.clamp(0, safeCount - 1).toInt(),
+                corner: pending.corner,
+              )
+            : FlipIntent.instant(
+                targetPage: pending.targetPage.clamp(0, safeCount - 1).toInt(),
+              ),
+      );
+    }
     _inFlightTarget = null;
     _completeJourney();
-  }
 
-  /// Called by the widget when the page count changes without the book
-  /// itself changing, e.g. an EPUB re-paginating after a font-size change.
-  ///
-  /// Unlike [attach] this keeps any queued intents, so a jump issued while
-  /// pagination is still settling is not thrown away.
-  void updatePageCount(int pageCount) {
-    if (_pageCount == pageCount) return;
-    _pageCount = pageCount;
-    final last = pageCount <= 0 ? 0 : pageCount - 1;
-    final clamped = _currentPage.clamp(0, last);
-    if (clamped != _currentPage) _currentPage = clamped;
+    if (_isAnimating) {
+      _isAnimating = false;
+      notifyListeners();
+      return;
+    }
+
     notifyListeners();
   }
 
-  /// Called by the widget whenever the current page changes.
-  void reportPage(int page) {
-    if (_currentPage != page) {
-      _currentPage = page;
-      notifyListeners();
+  /// Updates the page count while keeping the current navigation context.
+  ///
+  /// This is important for EPUB re-pagination: queued requests remain valid,
+  /// but their page targets are clamped to the new document bounds.
+  void updatePageCount(int pageCount) {
+    final safeCount = _maxInt(pageCount, 0);
+
+    if (_pageCount == safeCount) {
+      return;
     }
-    if (_inFlightTarget == _currentPage) _inFlightTarget = null;
-    if (_journeyTarget == _currentPage && _queue.isEmpty) {
+
+    _pageCount = safeCount;
+
+    if (safeCount == 0) {
+      _currentPage = 0;
+      _queue.clear();
+      _inFlightTarget = null;
       _completeJourney();
+      notifyListeners();
+      return;
     }
-  }
 
-  /// Called by the widget when an animation starts or ends.
-  void reportAnimating(bool value) {
-    if (_isAnimating != value) {
-      _isAnimating = value;
+    final last = safeCount - 1;
+    final oldPage = _currentPage;
+    _currentPage = _currentPage.clamp(0, last).toInt();
+
+    // Clamp queued intents so projectedPage never points outside the new
+    // pagination range.
+    if (_queue.isNotEmpty) {
+      final clamped = Queue<FlipIntent>();
+
+      for (final intent in _queue) {
+        final target = intent.targetPage.clamp(0, last).toInt();
+
+        // A clamped target equal to the immediately previous target is
+        // redundant. Keeping the first request preserves journey ordering
+        // without producing no-op flips.
+        if (target == _currentPage) {
+          continue;
+        }
+
+        if (clamped.isNotEmpty && clamped.last.targetPage == target) {
+          continue;
+        }
+
+        clamped.add(
+          intent.animate
+              ? FlipIntent.animated(targetPage: target, corner: intent.corner)
+              : FlipIntent.instant(targetPage: target),
+        );
+      }
+
+      _queue
+        ..clear()
+        ..addAll(clamped);
+    }
+
+    if (_inFlightTarget != null) {
+      _inFlightTarget = _inFlightTarget!.clamp(0, last).toInt();
+
+      if (_inFlightTarget == _currentPage) {
+        _inFlightTarget = null;
+      }
+    }
+
+    if (_journeyTarget != null) {
+      _journeyTarget = _journeyTarget!.clamp(0, last).toInt();
+
+      if (_journeyTarget == _currentPage &&
+          _queue.isEmpty &&
+          _inFlightTarget == null) {
+        _completeJourney();
+      }
+    }
+
+    _maybeCompleteJourney();
+
+    if (oldPage != _currentPage || _queue.isNotEmpty) {
+      notifyListeners();
+    } else {
       notifyListeners();
     }
   }
 
-  // ── Public API ────────────────────────────────────────────────────────────
+  /// Called by the reader whenever the committed page changes.
+  void reportPage(int page) {
+    if (_pageCount <= 0) {
+      if (_currentPage != 0 || _inFlightTarget != null) {
+        _currentPage = 0;
+        _inFlightTarget = null;
+        notifyListeners();
+      }
+      _maybeCompleteJourney();
+      return;
+    }
 
-  /// Animate a flip to the next page.
+    final safePage = page.clamp(0, _pageCount - 1).toInt();
+
+    if (_currentPage != safePage) {
+      _currentPage = safePage;
+      notifyListeners();
+    }
+
+    if (_inFlightTarget == _currentPage) {
+      _inFlightTarget = null;
+    }
+
+    _maybeCompleteJourney();
+  }
+
+  /// Called by the reader when an animation starts/ends.
+  void reportAnimating(bool value) {
+    if (_isAnimating == value) return;
+
+    _isAnimating = value;
+    notifyListeners();
+  }
+
+  // ── Public navigation API ────────────────────────────────────────────────
+
+  /// Animates a flip to the next page.
   ///
-  /// [corner] determines which corner peels. Defaults to [FlipCorner.bottomRight].
-  ///
-  /// Repeated calls stack: tapping "next" three times in one frame queues three
-  /// flips rather than three requests for the same page.
+  /// Repeated calls queue one turn per call rather than collapsing onto a
+  /// single target.
   void flipNext({FlipCorner corner = FlipCorner.bottomRight}) {
     final from = _projectedPage;
-    if (from >= _pageCount - 1) return;
-    _enqueue(_FlipIntent.animated(
-      targetPage: from + 1,
-      corner: corner,
-    ));
+
+    if (_pageCount <= 0 || from >= _pageCount - 1) {
+      return;
+    }
+
+    _enqueue(FlipIntent.animated(targetPage: from + 1, corner: corner));
   }
 
-  /// Animate a flip to the previous page.
-  ///
-  /// [corner] defaults to [FlipCorner.bottomLeft].
-  ///
-  /// Repeated calls stack, as with [flipNext].
+  /// Animates a flip to the previous page.
   void flipPrev({FlipCorner corner = FlipCorner.bottomLeft}) {
     final from = _projectedPage;
-    if (from <= 0) return;
-    _enqueue(_FlipIntent.animated(
-      targetPage: from - 1,
-      corner: corner,
-    ));
+
+    if (_pageCount <= 0 || from <= 0) {
+      return;
+    }
+
+    _enqueue(FlipIntent.animated(targetPage: from - 1, corner: corner));
   }
 
-  /// Jump to [page] (zero-based).
+  /// Moves to [page].
   ///
-  /// When [animate] is `true` (default), intermediate pages are queued so the
-  /// user sees every page turn. When `false`, the jump is instant.
+  /// With [animate] true, every intermediate page is visited in sequence.
+  /// With [animate] false, one instantaneous intent is queued.
   ///
-  /// The returned future completes once the book has actually reached [page].
+  /// The returned future completes when the reader has committed the requested
+  /// destination, or immediately when it is already there.
   Future<void> goToPage(int page, {bool animate = true}) {
-    if (_pageCount <= 0) return Future<void>.value();
-
-    final target = page.clamp(0, _pageCount - 1);
-    final from = _projectedPage;
-    if (target == from) return Future<void>.value();
-
-    if (!animate) {
-      _journeyTarget = target;
-      // Create the completer *before* notifying: _enqueue notifies
-      // synchronously, so the widget may reach the target and try to complete
-      // the journey before this method returns.
+    if (_pageCount <= 0) {
+      _journeyTarget = page;
       final future = _journeyFuture();
-      _enqueue(_FlipIntent.instant(targetPage: target));
+      _queue.clear();
+      _inFlightTarget = null;
+      _enqueue(
+        animate
+            ? FlipIntent.animated(
+                targetPage: page,
+                corner: FlipCorner.bottomRight,
+              )
+            : FlipIntent.instant(targetPage: page),
+      );
       return future;
     }
 
-    // Queue every intermediate flip up front. The widget consumes them one at
-    // a time, starting the next only once the previous has committed, so
-    // nothing is dropped.
+    final target = page.clamp(0, _pageCount - 1).toInt();
+
+    final from = _projectedPage;
+
+    if (target == from) {
+      return Future<void>.value();
+    }
+
+    // The journey target is set before the synchronous notification so a
+    // reader consuming the intent during the notification cannot observe a
+    // half-created journey.
+    _journeyTarget = target;
+    final future = _journeyFuture();
+
+    if (!animate) {
+      _queue.add(FlipIntent.instant(targetPage: target));
+      notifyListeners();
+      return future;
+    }
+
     final step = target > from ? 1 : -1;
     final corner = step > 0 ? FlipCorner.bottomRight : FlipCorner.bottomLeft;
 
-    int cursor = from;
+    var cursor = from;
+
     while (cursor != target) {
       cursor += step;
-      _queue.add(_FlipIntent.animated(targetPage: cursor, corner: corner));
+
+      _queue.add(FlipIntent.animated(targetPage: cursor, corner: corner));
     }
-    _journeyTarget = target;
-    final future = _journeyFuture();
+
     notifyListeners();
     return future;
   }
 
-  /// Move to the next page without animation (instant update).
+  /// Moves one page forward without a curl animation.
   void nextPage() {
     final from = _projectedPage;
-    if (from >= _pageCount - 1) return;
-    _enqueue(_FlipIntent.instant(targetPage: from + 1));
+
+    if (_pageCount <= 0 || from >= _pageCount - 1) {
+      return;
+    }
+
+    _enqueue(FlipIntent.instant(targetPage: from + 1));
   }
 
-  /// Move to the previous page without animation (instant update).
+  /// Moves one page backward without a curl animation.
   void previousPage() {
     final from = _projectedPage;
-    if (from <= 0) return;
-    _enqueue(_FlipIntent.instant(targetPage: from - 1));
+
+    if (_pageCount <= 0 || from <= 0) {
+      return;
+    }
+
+    _enqueue(FlipIntent.instant(targetPage: from - 1));
   }
 
-  // ── Flip behaviour overrides ──────────────────────────────────────────────
+  // ── Runtime flip settings ────────────────────────────────────────────────
 
   bool? _enabledOverride;
   Duration? _durationOverride;
 
-  /// Overrides [FlipSettings.enabled] at runtime, or clears the override when
-  /// passed `null`.
-  ///
-  /// The widget's own `flip:` settings remain the baseline; this only changes
-  /// the one field, so a host can toggle the animation without rebuilding.
+  /// Overrides the reader's `FlipSettings.enabled` value.
   void setFlipEnabled(bool? enabled) {
     if (_enabledOverride == enabled) return;
+
     _enabledOverride = enabled;
     notifyListeners();
   }
 
-  /// Overrides [FlipSettings.duration] at runtime, or clears the override when
-  /// passed `null`.
+  /// Overrides the reader's `FlipSettings.duration` value.
   void setFlipDuration(Duration? duration) {
     if (_durationOverride == duration) return;
+
     _durationOverride = duration;
     notifyListeners();
   }
 
-  /// Drops every runtime override, restoring the widget's own settings.
+  /// Clears all runtime flip-setting overrides.
   void clearFlipOverrides() {
-    if (_enabledOverride == null && _durationOverride == null) return;
+    if (_enabledOverride == null && _durationOverride == null) {
+      return;
+    }
+
     _enabledOverride = null;
     _durationOverride = null;
     notifyListeners();
   }
 
-  /// Applies any runtime overrides on top of [base]. Called by the widget.
+  /// Applies runtime overrides over the widget's baseline settings.
   FlipSettings applyFlipOverrides(FlipSettings base) {
-    if (_enabledOverride == null && _durationOverride == null) return base;
+    if (_enabledOverride == null && _durationOverride == null) {
+      return base;
+    }
+
     return base.copyWith(
       enabled: _enabledOverride,
       duration: _durationOverride,
     );
   }
 
-  // ── Internals ─────────────────────────────────────────────────────────────
+  /// Returns the effective animation-enabled setting, if an override exists.
+  ///
+  /// Kept separate from [applyFlipOverrides] so internal renderers can inspect
+  /// one value without rebuilding a whole settings object.
+  bool? get flipEnabledOverride => _enabledOverride;
 
-  // Completes when a multi-step [goToPage] finally reaches its target.
+  /// Returns the effective duration override, if present.
+  Duration? get flipDurationOverride => _durationOverride;
+
+  // ── Internals ────────────────────────────────────────────────────────────
+
   Completer<void>? _journey;
   int? _journeyTarget;
-
-  // Target of the flip the widget is currently running, if any.
   int? _inFlightTarget;
 
-  /// The page the book will show once every queued intent has been consumed.
-  ///
-  /// Stepping from here rather than from [currentPage] is what lets rapid
-  /// repeated calls queue up instead of collapsing onto a single target.
+  /// Page reached after all currently queued/in-flight intents complete.
   int get _projectedPage {
-    if (_queue.isNotEmpty) return _queue.last.targetPage;
+    if (_queue.isNotEmpty) {
+      return _queue.last.targetPage;
+    }
+
     return _inFlightTarget ?? _currentPage;
   }
 
-  Future<void> _journeyFuture() =>
-      (_journey ??= Completer<void>()).future;
+  Future<void> _journeyFuture() {
+    final existing = _journey;
+    if (existing != null) {
+      return existing.future;
+    }
+
+    final created = Completer<void>();
+    _journey = created;
+    return created.future;
+  }
+
+  void _maybeCompleteJourney() {
+    final target = _journeyTarget;
+
+    if (target == null) return;
+    if (_queue.isNotEmpty) return;
+    if (_inFlightTarget != null) return;
+    if (_currentPage != target) return;
+
+    _completeJourney();
+  }
 
   void _completeJourney() {
     _journeyTarget = null;
+
     final journey = _journey;
     _journey = null;
-    if (journey != null && !journey.isCompleted) journey.complete();
+
+    if (journey != null && !journey.isCompleted) {
+      journey.complete();
+    }
   }
 
-  void _enqueue(_FlipIntent intent) {
+  void _enqueue(FlipIntent intent) {
     _queue.add(intent);
     notifyListeners();
   }
@@ -273,23 +423,29 @@ class FlipBookController extends ChangeNotifier {
   void dispose() {
     _queue.clear();
     _inFlightTarget = null;
+    _isAnimating = false;
+
     _completeJourney();
+
     super.dispose();
   }
 }
 
-/// Internal representation of a flip request.
-class _FlipIntent {
-  const _FlipIntent.animated({
+/// Internal representation of a navigation request.
+class FlipIntent {
+  const FlipIntent.animated({
     required this.targetPage,
-    required FlipCorner this.corner,
+    required this.corner,
   }) : animate = true;
 
-  const _FlipIntent.instant({required this.targetPage})
-      : animate = false,
-        corner = FlipCorner.bottomRight;
+  const FlipIntent.instant({required this.targetPage})
+    : animate = false,
+      corner = FlipCorner.bottomRight;
 
   final int targetPage;
   final bool animate;
   final FlipCorner corner;
 }
+
+/// Avoids calling `clamp()` with an invalid negative upper bound.
+int _maxInt(int value, int min) => value < min ? min : value;

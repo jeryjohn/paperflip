@@ -56,6 +56,7 @@ class MeshFlipBook extends StatefulWidget {
     this.meshColumns = PageCurlMesh.defaultColumns,
     this.capturePixelRatio = 2.0,
     this.debugShowMesh = false,
+    this.contentVersion = 0,
   });
 
   /// Total number of pages.
@@ -94,6 +95,14 @@ class MeshFlipBook extends StatefulWidget {
   /// Draws the mesh wireframe over the page. Development aid only.
   final bool debugShowMesh;
 
+  /// Identifies a change in the page content that should invalidate captured
+  /// textures. Document sources such as EPUB should increment this when their
+  /// pagination/layout changes.
+  ///
+  /// This is deliberately separate from widget identity because a page builder
+  /// can remain the same function while the document it renders changes.
+  final int contentVersion;
+
   @override
   State<MeshFlipBook> createState() => _MeshFlipBookState();
 }
@@ -124,8 +133,35 @@ class _MeshFlipBookState extends State<MeshFlipBook>
   /// and the page would sit flat and then pop into a curl.
   final Map<int, SheetAtlas> _atlases = {};
   final Set<int> _packing = {};
+  final Set<int> _capturing = {};
 
-  SheetAtlas? get _atlas => _roles == null ? null : _atlases[_roles!.turningFront];
+  /// Ensures build() can request capture work without stacking multiple
+  /// post-frame callbacks for the same page window.
+  bool _capturePassScheduled = false;
+
+  /// When a spring ends, the geometry smoother can still be one or two frames
+  /// behind the spring. We hold the logical settle result until the displayed
+  /// curl has actually reached that target; this removes the final-frame snap.
+  double? _settleCompletionTarget;
+
+  /// Resize/page-count changes invalidate the current visual turn. Guard the
+  /// animation status callback while the settle controller is stopped.
+  bool _resettingLayout = false;
+
+  /// Build-time changes are deferred until after the current build so neither
+  /// the controller nor the paint-only scene can synchronously notify an
+  /// ancestor while Flutter is laying out this widget.
+  bool _layoutUpdateScheduled = false;
+  Size? _pendingLayoutSize;
+
+  /// Source/widget-property changes are coalesced into one post-frame reset.
+  bool _sourceResetScheduled = false;
+  bool _sourceResetPending = false;
+
+  final PageCurlRenderer _renderer = PageCurlRenderer();
+
+  SheetAtlas? get _atlas =>
+      _roles == null ? null : _atlases[_roles!.turningFront];
 
   // Gesture state.
   Offset? _dragStart;
@@ -137,13 +173,20 @@ class _MeshFlipBookState extends State<MeshFlipBook>
   Duration _lastTick = Duration.zero;
   int _captureGeneration = 0;
 
+  double get _effectiveCapturePixelRatio =>
+      widget.capturePixelRatio.isFinite && widget.capturePixelRatio > 0
+      ? widget.capturePixelRatio
+      : 1.0;
+
   FlipBookController? get _controller => widget.controller;
 
   @override
   void initState() {
     super.initState();
-    _currentPage = widget.initialPage.clamp(0, math.max(0, widget.pageCount - 1)).toInt();
-    _rasterizer = WidgetPageRasterizer(pixelRatio: widget.capturePixelRatio);
+    _currentPage = widget.initialPage
+        .clamp(0, math.max(0, widget.pageCount - 1))
+        .toInt();
+    _rasterizer = WidgetPageRasterizer(pixelRatio: _effectiveCapturePixelRatio);
     _settle = AnimationController.unbounded(vsync: this)
       ..addListener(_onSettleTick)
       ..addStatusListener(_onSettleStatus);
@@ -155,18 +198,31 @@ class _MeshFlipBookState extends State<MeshFlipBook>
   @override
   void didUpdateWidget(covariant MeshFlipBook old) {
     super.didUpdateWidget(old);
+
     if (old.controller != widget.controller) {
       old.controller?.removeListener(_onControllerUpdate);
-      _controller?.attach(widget.pageCount, _currentPage);
       _controller?.addListener(_onControllerUpdate);
-    } else if (old.pageCount != widget.pageCount) {
-      _currentPage =
-          _currentPage.clamp(0, math.max(0, widget.pageCount - 1)).toInt();
-      _controller?.updatePageCount(widget.pageCount);
+
+      _scheduleSourceReset(reattachController: true);
     }
-    if (old.capturePixelRatio != widget.capturePixelRatio) {
-      _rasterizer = WidgetPageRasterizer(pixelRatio: widget.capturePixelRatio);
-      _invalidateTextures();
+
+    final pageCountChanged = old.pageCount != widget.pageCount;
+    final captureRatioChanged =
+        old.capturePixelRatio != widget.capturePixelRatio;
+    final meshChanged = old.meshColumns != widget.meshColumns;
+    final sourceChanged =
+        old.pageBuilder != widget.pageBuilder ||
+        old.contentVersion != widget.contentVersion;
+    final pageBackChanged = old.pageBackColor != widget.pageBackColor;
+
+    if (captureRatioChanged ||
+        meshChanged ||
+        sourceChanged ||
+        pageBackChanged ||
+        pageCountChanged) {
+      _scheduleSourceReset(
+        reattachController: old.controller != widget.controller,
+      );
     }
   }
 
@@ -180,6 +236,7 @@ class _MeshFlipBookState extends State<MeshFlipBook>
       atlas.dispose();
     }
     _atlases.clear();
+    _capturing.clear();
     _cache.clear();
     _paperImage?.dispose();
     super.dispose();
@@ -190,7 +247,7 @@ class _MeshFlipBookState extends State<MeshFlipBook>
   /// Page indices worth having ready: the current page and its neighbours.
   List<int> get _window {
     final indices = <int>[];
-    for (var offset = -1; offset <= 2; offset++) {
+    for (var offset = -1; offset <= 1; offset++) {
       final index = _currentPage + offset;
       if (index >= 0 && index < widget.pageCount) indices.add(index);
     }
@@ -198,18 +255,19 @@ class _MeshFlipBookState extends State<MeshFlipBook>
   }
 
   PageTextureKey _keyFor(int index) => PageTextureKey(
-        sourceId: identityHashCode(widget.pageBuilder),
-        pageId: index,
-        logicalSize: _pageSize,
-        pixelRatio: widget.capturePixelRatio,
-        contentVersion: _captureGeneration,
-      );
+    sourceId: identityHashCode(widget.pageBuilder),
+    pageId: index,
+    logicalSize: _pageSize,
+    pixelRatio: _effectiveCapturePixelRatio,
+    contentVersion: Object.hash(widget.contentVersion, _captureGeneration),
+  );
 
   GlobalKey _captureKeyFor(int index) =>
       _captureKeys.putIfAbsent(index, GlobalKey.new);
 
   void _invalidateTextures() {
     _captureGeneration++;
+    _capturing.clear();
     _cache.clear();
     for (final atlas in _atlases.values) {
       atlas.dispose();
@@ -218,37 +276,201 @@ class _MeshFlipBookState extends State<MeshFlipBook>
     _packing.clear();
   }
 
-  /// Captures any page in the window that is not already cached.
+  /// Cancels a visual turn without changing the logical page. Used when the
+  /// source changes underneath the renderer (for example, EPUB re-pagination)
+  /// or when the viewport is resized.
+  void _cancelActiveTurnForSourceChange({bool notify = true}) {
+    _resettingLayout = true;
+    try {
+      if (_settle.isAnimating) {
+        _settle.stop();
+      }
+    } finally {
+      _resettingLayout = false;
+    }
+
+    _dragStart = null;
+    _dragDecided = false;
+    _dragging = false;
+    _rawProgress = 0.0;
+    _settleCompletionTarget = null;
+    _roles = null;
+    _smoother.reset(CurlParameters.rest);
+    _stopTicking();
+
+    if (notify) {
+      _scene.rest();
+      _controller?.reportAnimating(false);
+    }
+  }
+
+  /// Defers source/layout mutation until after the current build.
   ///
-  /// Runs after the frame, because a boundary can only be read back once it
-  /// has painted. One page per pass keeps the cost off any single frame.
-  void _prepareTextures() {
-    if (_pageSize.isEmpty) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
+  /// This is intentionally the single entry point for changes that can affect
+  /// page count, textures, mesh size, controller attachment or paper colour.
+  /// It prevents `notifyListeners()` from running inside LayoutBuilder or
+  /// didUpdateWidget.
+  void _scheduleSourceReset({bool reattachController = false}) {
+    _sourceResetPending = true;
+    if (_sourceResetScheduled) return;
+
+    _sourceResetScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _sourceResetScheduled = false;
       if (!mounted) return;
-      final generation = _captureGeneration;
-      for (final index in _window) {
-        final key = _keyFor(index);
-        if (_cache.contains(key)) continue;
-        final texture = await _rasterizer.capture(
+
+      _cancelActiveTurnForSourceChange(notify: false);
+
+      if (widget.pageCount <= 0) {
+        _currentPage = 0;
+      } else {
+        _currentPage = _currentPage.clamp(0, widget.pageCount - 1).toInt();
+      }
+
+      if (widget.capturePixelRatio != 0) {
+        _rasterizer = WidgetPageRasterizer(
+          pixelRatio: _effectiveCapturePixelRatio,
+        );
+      }
+
+      if (_pageSize.isFinite && !_pageSize.isEmpty) {
+        _mesh = PageCurlMesh.forPage(
+          pageSize: _pageSize,
+          columns: math.max(4, widget.meshColumns),
+        );
+        _camera = PageCurlCamera.forPage(_pageSize);
+      }
+
+      _paperImage?.dispose();
+      _paperImage = null;
+
+      _invalidateTextures();
+      _sourceResetPending = false;
+
+      if (reattachController) {
+        _controller?.attach(widget.pageCount, _currentPage);
+      } else {
+        _controller?.updatePageCount(widget.pageCount);
+        _controller?.reportPage(_currentPage);
+      }
+
+      _scene.rest();
+      _controller?.reportAnimating(false);
+
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
+  /// Defers a new finite page size until after the current LayoutBuilder build.
+  void _scheduleLayoutUpdate(Size size) {
+    _pendingLayoutSize = size;
+    if (_layoutUpdateScheduled) return;
+
+    _layoutUpdateScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _layoutUpdateScheduled = false;
+      final pending = _pendingLayoutSize;
+      _pendingLayoutSize = null;
+
+      if (!mounted || pending == null) return;
+      if (pending.isEmpty ||
+          !pending.width.isFinite ||
+          !pending.height.isFinite) {
+        return;
+      }
+
+      _cancelActiveTurnForSourceChange(notify: false);
+
+      _pageSize = pending;
+      _mesh = PageCurlMesh.forPage(
+        pageSize: pending,
+        columns: math.max(4, widget.meshColumns),
+      );
+      _camera = PageCurlCamera.forPage(pending);
+
+      _invalidateTextures();
+      _sourceResetPending = false;
+
+      _scene.rest();
+      _controller?.reportAnimating(false);
+
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
+  /// Schedules a single post-frame capture pass. build() can run many times
+  /// during a Flutter frame, but only one capture request is allowed to enter
+  /// the queue at a time.
+  void _prepareTextures() {
+    if (_sourceResetPending ||
+        _pageSize.isEmpty ||
+        !_pageSize.width.isFinite ||
+        !_pageSize.height.isFinite ||
+        _capturePassScheduled) {
+      return;
+    }
+
+    _capturePassScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _capturePassScheduled = false;
+      if (!mounted) return;
+      unawaited(_captureOneTexture());
+    });
+  }
+
+  /// Captures at most one missing page per pass. This keeps raster readback
+  /// work predictable and prevents several builds from starting the same
+  /// expensive capture concurrently.
+  Future<void> _captureOneTexture() async {
+    if (!mounted ||
+        _sourceResetPending ||
+        _pageSize.isEmpty ||
+        !_pageSize.width.isFinite ||
+        !_pageSize.height.isFinite) {
+      return;
+    }
+
+    final generation = _captureGeneration;
+    final window = _window;
+
+    for (final index in window) {
+      final key = _keyFor(index);
+      if (_cache.contains(key) || _capturing.contains(index)) continue;
+
+      _capturing.add(index);
+      PageTexture? texture;
+      try {
+        texture = await _rasterizer.capture(
           _captureKeyFor(index),
           logicalSize: _pageSize,
           textureKey: key,
         );
-        if (!mounted || texture == null) return;
-        // A resize or a rebuild may have invalidated this capture while it was
-        // in flight. Discarding it is the whole point of the generation
-        // counter: a stale texture that reaches the cache shows the wrong
-        // layout later, silently.
-        if (generation != _captureGeneration) {
-          texture.dispose();
-          return;
-        }
-        _cache.put(key, texture);
-        _prepareAdjacentSheets();
-        return; // one per frame
+      } finally {
+        _capturing.remove(index);
       }
-    });
+
+      if (!mounted || texture == null) return;
+
+      // A resize/source update can invalidate a capture while it is in
+      // flight. Never let a stale texture enter the cache.
+      if (generation != _captureGeneration) {
+        texture.dispose();
+        _prepareTextures();
+        return;
+      }
+
+      _cache.put(key, texture);
+      _prepareAdjacentSheets();
+
+      // Exactly one page per frame. The next pass is requested after the
+      // current capture completes, so four pages do not all rasterise at once.
+      _prepareTextures();
+      return;
+    }
   }
 
   /// A plain paper-coloured image, used for the back of a turning sheet.
@@ -307,12 +529,15 @@ class _MeshFlipBookState extends State<MeshFlipBook>
       _atlases[index] = atlas;
       _evictDistantSheets();
       if (_roles?.turningFront == index) {
-        _scene.commit(
-          curl: _scene.curl,
-          active: _scene.active,
-          atlas: atlas,
-        );
+        _scene.commit(curl: _scene.curl, active: true, atlas: atlas);
+        // The live page is allowed to switch to the revealed page only after
+        // the turning sheet exists. Otherwise the first drag frame can expose
+        // the destination underneath a missing curl surface.
+        if (mounted) setState(() {});
       }
+      // A completed turn may have advanced the logical page while this sheet
+      // was being packed. Keep the next forward/backward starting sheets warm.
+      _prepareAdjacentSheets();
     } finally {
       _packing.remove(index);
     }
@@ -327,10 +552,12 @@ class _MeshFlipBookState extends State<MeshFlipBook>
     }
   }
 
-  /// Packs the two sheets a turn could start on: forward and backward.
+  /// Keeps the sheets needed for both immediate directions, plus the next
+  /// forward sheet, warm before the user can ask for it.
   void _prepareAdjacentSheets() {
-    unawaited(_prepareSheet(_currentPage));
     unawaited(_prepareSheet(_currentPage - 1));
+    unawaited(_prepareSheet(_currentPage));
+    unawaited(_prepareSheet(_currentPage + 1));
   }
 
   // ── Frame loop ────────────────────────────────────────────────────────────
@@ -341,11 +568,24 @@ class _MeshFlipBookState extends State<MeshFlipBook>
         : (elapsed - _lastTick).inMicroseconds / 1e6;
     _lastTick = elapsed;
 
-    if (_smoother.advance(dt)) {
-      _scene.commit(curl: _smoother.displayed, active: true, atlas: _atlas);
+    final changed = _smoother.advance(dt);
+    final atlas = _atlas;
+    if (changed && atlas != null) {
+      _scene.commit(curl: _smoother.displayed, active: true, atlas: atlas);
     }
+
+    final settleTarget = _settleCompletionTarget;
+    if (settleTarget != null && !_settle.isAnimating && _smoother.isSettled) {
+      _settleCompletionTarget = null;
+      _finishSettle(settleTarget);
+      return;
+    }
+
     // Stop ticking once the display has caught up and nothing is driving it.
-    if (_smoother.isSettled && !_dragging && !_settle.isAnimating) {
+    if (_smoother.isSettled &&
+        !_dragging &&
+        !_settle.isAnimating &&
+        _settleCompletionTarget == null) {
       _stopTicking();
     }
   }
@@ -365,14 +605,14 @@ class _MeshFlipBookState extends State<MeshFlipBook>
   // ── Gestures ──────────────────────────────────────────────────────────────
 
   void _onPanStart(DragStartDetails details) {
-    if (_settle.isAnimating) return;
+    if (!widget.flip.enabled || _settle.isAnimating) return;
     _dragStart = details.localPosition;
     _dragDecided = false;
     _dragging = false;
   }
 
   void _onPanUpdate(DragUpdateDetails details) {
-    if (_settle.isAnimating) return;
+    if (!widget.flip.enabled || _settle.isAnimating) return;
     final start = _dragStart;
     if (start == null || _pageSize.isEmpty) return;
 
@@ -443,20 +683,24 @@ class _MeshFlipBookState extends State<MeshFlipBook>
   /// momentum the finger gave it, so release feels continuous with the drag
   /// instead of restarting as a fresh animation.
   void _settleTo(double target, {double velocity = 0.0}) {
+    final roles = _roles;
+    if (roles == null) return;
+
     final from = _smoother.target.progress;
-    if ((target - from).abs() < 1e-3) {
-      _finishSettle(target);
-      return;
-    }
+    _settleCompletionTarget = null;
     _controller?.reportAnimating(true);
     _startTicking();
+
+    if ((target - from).abs() < 1e-3) {
+      // Still let the display smoother consume the exact final target.
+      _smoother.setTarget(_curlFor(target, roles.direction));
+      _settleCompletionTarget = target;
+      return;
+    }
+
     _settle.animateWith(
       SpringSimulation(
-        SpringDescription.withDampingRatio(
-          mass: 1,
-          stiffness: 220,
-          ratio: 1.0,
-        ),
+        SpringDescription.withDampingRatio(mass: 1, stiffness: 220, ratio: 1.0),
         from,
         target,
         velocity,
@@ -473,31 +717,42 @@ class _MeshFlipBookState extends State<MeshFlipBook>
   }
 
   void _onSettleStatus(AnimationStatus status) {
+    if (_resettingLayout) return;
     if (status == AnimationStatus.completed ||
         status == AnimationStatus.dismissed) {
-      _finishSettle(_settle.value.clamp(0.0, 1.0).toDouble());
+      final target = _settle.value.clamp(0.0, 1.0).toDouble();
+      _settleCompletionTarget = target;
+      _smoother.setTarget(_curlFor(target, _roles?.direction ?? 1));
+      _startTicking();
     }
   }
 
   void _finishSettle(double target) {
+    if (!mounted) return;
+
     final roles = _roles;
     _roles = null;
     _rawProgress = 0.0;
+    _settleCompletionTarget = null;
     _smoother.reset(CurlParameters.rest);
     _scene.rest();
-    _stopTicking();
 
     if (roles != null && target >= 0.5) {
-      final destination =
-          roles.destination.clamp(0, math.max(0, widget.pageCount - 1)).toInt();
+      final destination = roles.destination
+          .clamp(0, math.max(0, widget.pageCount - 1))
+          .toInt();
       if (destination != _currentPage) {
         _currentPage = destination;
         _controller?.reportPage(_currentPage);
         _evictDistantSheets();
       }
     }
+
+    _prepareAdjacentSheets();
+    _prepareTextures();
     _controller?.reportAnimating(false);
     if (mounted) setState(() {});
+    _stopTicking();
     _drainIntents();
   }
 
@@ -519,13 +774,17 @@ class _MeshFlipBookState extends State<MeshFlipBook>
         final intent = controller.pendingIntent;
         if (intent == null) return;
         controller.clearIntent();
-        final target =
-            intent.targetPage.clamp(0, math.max(0, widget.pageCount - 1)).toInt();
+        final target = intent.targetPage
+            .clamp(0, math.max(0, widget.pageCount - 1))
+            .toInt();
         if (target == _currentPage) continue;
 
         if (!intent.animate || !widget.flip.enabled) {
           setState(() => _currentPage = target);
           controller.reportPage(_currentPage);
+          _evictDistantSheets();
+          _prepareAdjacentSheets();
+          _prepareTextures();
           continue;
         }
 
@@ -554,18 +813,34 @@ class _MeshFlipBookState extends State<MeshFlipBook>
     return LayoutBuilder(
       builder: (context, constraints) {
         final size = Size(constraints.maxWidth, constraints.maxHeight);
-        if (size != _pageSize) {
-          _pageSize = size;
-          _mesh = PageCurlMesh.forPage(
-            pageSize: size,
-            columns: widget.meshColumns,
+
+        // LayoutBuilder can legally receive an unbounded axis from a parent
+        // such as Column/ScrollView. Never feed an infinite Size into the mesh
+        // or perspective camera.
+        if (size.isEmpty || !size.width.isFinite || !size.height.isFinite) {
+          return ColoredBox(
+            color: widget.backgroundColor,
+            child: const SizedBox.shrink(),
           );
-          _camera = PageCurlCamera.forPage(size);
-          // A texture captured at the old size no longer lines up.
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) _invalidateTextures();
-          });
         }
+
+        // Never mutate/listen-notify during this build. Let the post-frame
+        // callback rebuild once with the new finite geometry.
+        if (size != _pageSize || _mesh == null || _camera == null) {
+          _scheduleLayoutUpdate(size);
+          return ColoredBox(
+            color: widget.backgroundColor,
+            child: const SizedBox.shrink(),
+          );
+        }
+
+        if (_sourceResetPending) {
+          return ColoredBox(
+            color: widget.backgroundColor,
+            child: const SizedBox.shrink(),
+          );
+        }
+
         _prepareTextures();
 
         final roles = _roles;
@@ -583,19 +858,23 @@ class _MeshFlipBookState extends State<MeshFlipBook>
                 // 1. Capture host. Mounted and painting so it can be read
                 //    back, and completely hidden by the layers above it.
                 Positioned.fill(
-                  child: ClipRect(
-                    child: OverflowBox(
-                      alignment: Alignment.topLeft,
-                      maxWidth: size.width,
-                      maxHeight: size.height,
-                      child: PageCaptureHost(
-                        indices: _window,
-                        keyFor: _captureKeyFor,
-                        pageSize: size,
-                        builder: (context, index) => widget.pageBuilder(
-                          context,
-                          index,
-                          pageConstraints,
+                  child: ExcludeSemantics(
+                    child: IgnorePointer(
+                      child: ClipRect(
+                        child: OverflowBox(
+                          alignment: Alignment.topLeft,
+                          maxWidth: size.width,
+                          maxHeight: size.height,
+                          child: PageCaptureHost(
+                            indices: _window,
+                            keyFor: _captureKeyFor,
+                            pageSize: size,
+                            builder: (context, index) => widget.pageBuilder(
+                              context,
+                              index,
+                              pageConstraints,
+                            ),
+                          ),
                         ),
                       ),
                     ),
@@ -620,6 +899,7 @@ class _MeshFlipBookState extends State<MeshFlipBook>
                         camera: _camera!,
                         showShadow: widget.showShadow,
                         debugShowMesh: widget.debugShowMesh,
+                        renderer: _renderer,
                       ),
                     ),
                   ),
@@ -639,7 +919,8 @@ class _MeshFlipBookState extends State<MeshFlipBook>
   ) {
     // While a sheet is turning, what sits under it is the page being revealed.
     // Otherwise it is simply the current page.
-    final index = roles?.revealed ?? _currentPage;
+    final turningAtlas = roles == null ? null : _atlases[roles.turningFront];
+    final index = turningAtlas != null ? roles!.revealed : _currentPage;
     if (index < 0 || index >= widget.pageCount) {
       return ColoredBox(color: widget.pageBackColor);
     }
@@ -658,6 +939,7 @@ class _CurlPainter extends CustomPainter {
     required this.camera,
     required this.showShadow,
     required this.debugShowMesh,
+    required this.renderer,
   }) : super(repaint: scene);
 
   final FlipScene scene;
@@ -665,9 +947,10 @@ class _CurlPainter extends CustomPainter {
   final PageCurlCamera camera;
   final bool showShadow;
   final bool debugShowMesh;
+  final PageCurlRenderer renderer;
 
-  static final PageCurlRenderer _renderer = PageCurlRenderer();
   static const PageCurlShadow _shadow = PageCurlShadow();
+  static const PageCurlGeometry _geometry = PageCurlGeometry();
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -680,13 +963,16 @@ class _CurlPainter extends CustomPainter {
       // Deform first so the shadow traces the real sheet, then let the
       // renderer redo it -- the shadow's outline must come from the same
       // geometry as the page, never from a straight-edged approximation.
-      const geometry = PageCurlGeometry();
-      geometry.deform(mesh, curl);
-      camera.projectBuffer(mesh.worldPositions, mesh.positions, mesh.vertexCount);
+      _geometry.deform(mesh, curl);
+      camera.projectBuffer(
+        mesh.worldPositions,
+        mesh.positions,
+        mesh.vertexCount,
+      );
       _shadow.paint(canvas, mesh, curl, camera: camera);
     }
 
-    _renderer.paint(canvas, mesh, curl, atlas, camera: camera);
+    renderer.paint(canvas, mesh, curl, atlas, camera: camera);
 
     if (debugShowMesh) _paintWireframe(canvas);
   }
@@ -731,5 +1017,6 @@ class _CurlPainter extends CustomPainter {
       old.mesh != mesh ||
       old.camera != camera ||
       old.showShadow != showShadow ||
-      old.debugShowMesh != debugShowMesh;
+      old.debugShowMesh != debugShowMesh ||
+      old.renderer != renderer;
 }

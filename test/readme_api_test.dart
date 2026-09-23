@@ -2,7 +2,6 @@
 // code drift apart, this stops compiling.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:pdfrx/pdfrx.dart';
 
 import 'package:flip_book/flip_book.dart';
 

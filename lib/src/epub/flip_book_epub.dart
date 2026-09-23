@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
 import 'package:flip_book/src/epub/epub_controller.dart';
@@ -9,10 +10,10 @@ import 'package:flip_book/src/epub/epub_reader_settings.dart';
 import 'package:flip_book/src/epub/epub_renderer.dart';
 import 'package:flip_book/src/epub/epub_source.dart';
 import 'package:flip_book/src/flip_book_controller.dart';
-import 'package:flip_book/src/flip_book_widget.dart';
 import 'package:flip_book/src/flip_settings.dart';
+import 'package:flip_book/src/mesh_flip_book.dart';
 
-/// A reflowable EPUB rendered through the page-flip engine.
+/// A reflowable EPUB rendered through the shared 3D mesh page-flip engine.
 ///
 /// ```dart
 /// FlipBookEpub(
@@ -24,6 +25,10 @@ import 'package:flip_book/src/flip_settings.dart';
 /// measured, and then sliced into viewport-sized pages. Changing the font size,
 /// line height, margin or orientation re-measures and re-paginates, and the
 /// reader's place is restored from an [EpubLocator] rather than a page number.
+///
+/// The EPUB renderer deliberately does not own a separate page-turn renderer.
+/// It prepares normal Flutter page widgets and hands them to [MeshFlipBook],
+/// which is the same 3D curl engine used by custom pages.
 class FlipBookEpub extends StatefulWidget {
   const FlipBookEpub({
     super.key,
@@ -84,7 +89,7 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
   int? _measuring;
 
   Size? _contentSize;
-  EpubReaderSettings? _laidOutWith;
+  EpubReaderSettings? _layoutSettings;
   EpubPagination? _pagination;
 
   /// Position to restore once the new pagination is ready.
@@ -101,7 +106,35 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
   /// How many chapters either side of the current one to keep prepared.
   static const int _chapterCacheRadius = 1;
 
+  /// Last known logical reading position. This is more reliable than a partial
+  /// page number when a resize/reflow happens while pagination is incomplete.
+  EpubLocator? _lastLocator;
+
   FlipBookController? _ownedFlipController;
+  FlipBookController? _listenedFlipController;
+  late final ValueNotifier<int> _pageIndicatorPage = ValueNotifier<int>(0);
+  bool _controllerMutationScheduled = false;
+
+  /// Stable callback identity for MeshFlipBook. The callback reads current
+  /// state from this State object, so it remains valid after re-pagination.
+  late final Widget Function(BuildContext, int, BoxConstraints)
+  _meshPageBuilder;
+
+  /// Prevents repeated post-frame layout resets while a reset is already queued.
+  bool _layoutResetScheduled = false;
+
+  /// Invalidates a running measurement pass. Every _MeasureHost captures the
+  /// generation that created it, so stale results cannot contaminate a new
+  /// pagination pass.
+  int _paginationGeneration = 0;
+
+  /// Changes whenever a completely new pagination should receive a fresh
+  /// MeshFlipBook state/cache.
+  int _meshGeneration = 0;
+
+  /// Page to show when the current complete pagination creates the mesh reader.
+  int _initialMeshPage = 0;
+
   FlipBookController get _flipController =>
       widget.controller ?? (_ownedFlipController ??= FlipBookController());
 
@@ -111,8 +144,10 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
   @override
   void initState() {
     super.initState();
+    _meshPageBuilder = _buildMeshPage;
+    _bindFlipController();
+    _pageIndicatorPage.value = _flipController.currentPage;
     widget.epubController?.addListener(_onEpubControllerChanged);
-    _flipController.addListener(_onFlipPageChanged);
     unawaited(_load());
   }
 
@@ -124,15 +159,19 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
       old.epubController?.removeListener(_onEpubControllerChanged);
       widget.epubController?.addListener(_onEpubControllerChanged);
     }
+
     if (old.controller != widget.controller) {
-      old.controller?.removeListener(_onFlipPageChanged);
-      _flipController.addListener(_onFlipPageChanged);
+      _rebindFlipController();
     }
+
     if (old.source != widget.source) {
       unawaited(_load());
-    } else if (old.reader != widget.reader &&
+      return;
+    }
+
+    if (old.reader != widget.reader &&
         widget.epubController == null &&
-        widget.reader != _laidOutWith) {
+        widget.reader != _layoutSettings) {
       _scheduleRepagination();
     }
   }
@@ -140,28 +179,75 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
   @override
   void dispose() {
     widget.epubController?.removeListener(_onEpubControllerChanged);
-    widget.controller?.removeListener(_onFlipPageChanged);
+    _listenedFlipController?.removeListener(_onFlipPageChanged);
     _ownedFlipController?.dispose();
+    _pageIndicatorPage.dispose();
     super.dispose();
   }
 
-  // ── Loading ───────────────────────────────────────────────────────────────
+  // ── Controller binding ─────────────────────────────────────────────────────
+
+  void _bindFlipController() {
+    final controller = _flipController;
+    if (_listenedFlipController == controller) return;
+
+    _listenedFlipController?.removeListener(_onFlipPageChanged);
+    _listenedFlipController = controller;
+    controller.addListener(_onFlipPageChanged);
+  }
+
+  void _rebindFlipController() {
+    _listenedFlipController?.removeListener(_onFlipPageChanged);
+    _listenedFlipController = null;
+
+    // The owned controller is no longer needed once the caller supplies an
+    // external controller. Dispose it so its listener/resources do not linger.
+    if (widget.controller != null && _ownedFlipController != null) {
+      _ownedFlipController!.dispose();
+      _ownedFlipController = null;
+    }
+
+    _bindFlipController();
+    _pageIndicatorPage.value = _flipController.currentPage;
+  }
+
+  // ── Loading ─────────────────────────────────────────────────────────────────
 
   Future<void> _load() async {
     final generation = ++_loadGeneration;
-    setState(() {
-      _document = null;
-      _error = null;
-      _heights.clear();
-      _chapterCache.clear();
-      _pagination = null;
-      _measuring = null;
-      _laidOutWith = null;
-    });
+
+    _paginationGeneration++;
+    _meshGeneration++;
+    _layoutResetScheduled = false;
+    _initialMeshPage = 0;
+    _restoreTo = null;
+    _lastLocator = null;
+
+    if (!mounted) return;
+
+    void resetBeforeLoad() {
+      if (!mounted || generation != _loadGeneration) return;
+      setState(() {
+        _document = null;
+        _error = null;
+        _heights.clear();
+        _chapterCache.clear();
+        _pagination = null;
+        _measuring = null;
+        _contentSize = null;
+        _layoutSettings = null;
+      });
+    }
+
+    // `_load()` can be started from didUpdateWidget(), which runs during the
+    // framework's update/build cycle. Never call setState synchronously from
+    // there; defer only when Flutter is currently building.
+    _scheduleControllerMutation(resetBeforeLoad);
 
     try {
       final document = await EpubDocument.open(widget.source);
       if (!mounted || generation != _loadGeneration) return;
+
       setState(() => _document = document);
       widget.epubController?.attachDocument(document);
       widget.onDocumentLoaded?.call(document);
@@ -171,57 +257,117 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
     }
   }
 
-  // ── Reflow ────────────────────────────────────────────────────────────────
+  // ── Reflow ──────────────────────────────────────────────────────────────────
 
   void _onEpubControllerChanged() {
     if (!mounted) return;
 
-    final controller = widget.epubController!;
+    // Controller notifications can happen while a descendant such as
+    // MeshFlipBook is being inserted during our own build. Do not mutate this
+    // State synchronously from that notification; defer the side effect until
+    // the current build has completed.
+    _scheduleControllerMutation(() {
+      if (!mounted) return;
 
-    // A chapter jump asked for while we are ready to act on it.
-    final pending = controller.pendingSpineIndex;
-    if (pending != null && _pagination != null) {
-      controller.clearPendingSpineIndex();
-      final page = _pagination!.startPageOf(pending);
-      unawaited(_flipController.goToPage(page, animate: false));
-    }
+      final controller = widget.epubController;
+      if (controller == null) return;
 
-    if (controller.settings != _laidOutWith) {
-      _scheduleRepagination();
-    }
+      final pending = controller.pendingSpineIndex;
+      final pagination = _pagination;
+
+      if (pending != null && pagination != null && pagination.isComplete) {
+        controller.clearPendingSpineIndex();
+        final page = pagination
+            .startPageOf(pending)
+            .clamp(0, mathMaxPage(pagination.totalPages))
+            .toInt();
+        unawaited(_flipController.goToPage(page, animate: false));
+        return;
+      }
+
+      if (controller.settings != _layoutSettings) {
+        _scheduleRepagination();
+      }
+    });
   }
 
   /// Drops measurements and starts a fresh pass, remembering where the reader
   /// was so their place can be restored afterwards.
   void _scheduleRepagination() {
     final pagination = _pagination;
-    if (pagination != null) {
-      _restoreTo = pagination.locatorAt(_flipController.currentPage);
+    if (pagination != null && pagination.isComplete) {
+      _restoreTo ??=
+          _lastLocator ?? pagination.locatorAt(_flipController.currentPage);
     }
-    setState(() {
-      _heights.clear();
-      _chapterCache.clear();
-      _pagination = null;
-      _measuring = null;
-      _laidOutWith = null;
+
+    _paginationGeneration++;
+    _meshGeneration++;
+    _heights.clear();
+    _chapterCache.clear();
+    _pagination = null;
+    _measuring = null;
+    _layoutSettings = null;
+
+    if (!mounted) return;
+
+    _scheduleControllerMutation(() {
+      if (!mounted) return;
+      setState(() {});
     });
   }
 
   void _onFlipPageChanged() {
     final pagination = _pagination;
-    if (pagination == null) return;
-    widget.epubController?.reportLocator(
-      pagination.locatorAt(_flipController.currentPage),
-    );
+    if (pagination != null && pagination.isComplete) {
+      final page = _flipController.currentPage
+          .clamp(0, mathMaxPage(pagination.totalPages))
+          .toInt();
+      _lastLocator = pagination.locatorAt(page);
+      widget.epubController?.reportLocator(_lastLocator!);
+    }
+
+    // The page indicator listens directly to this notifier, so the parent
+    // EpubReader state does not need to call setState from a controller
+    // notification. This is especially important when MeshFlipBook attaches
+    // the controller during its own insertion into the widget tree.
+    _pageIndicatorPage.value = _flipController.currentPage;
   }
+
+  void _scheduleControllerMutation(VoidCallback mutation) {
+    if (!mounted) return;
+
+    final phase = SchedulerBinding.instance.schedulerPhase;
+    final duringBuild =
+        phase == SchedulerPhase.persistentCallbacks ||
+        phase == SchedulerPhase.midFrameMicrotasks ||
+        phase == SchedulerPhase.transientCallbacks;
+
+    if (!duringBuild) {
+      mutation();
+      return;
+    }
+
+    if (_controllerMutationScheduled) return;
+    _controllerMutationScheduled = true;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _controllerMutationScheduled = false;
+      if (!mounted) return;
+      mutation();
+    });
+  }
+
+  // ── Pagination ──────────────────────────────────────────────────────────────
 
   /// Records a measured document height and queues the next one.
   ///
   /// Measurement runs one document per frame. Text measurement cannot leave
   /// the UI isolate in Flutter, so doing the whole book in one pass would
   /// block for as long as it takes to lay out every chapter.
-  void _onMeasured(int spineIndex, double height) {
-    if (!mounted || _heights[spineIndex] == height) return;
+  void _onMeasured(int spineIndex, double height, int generation) {
+    if (!mounted || generation != _paginationGeneration) return;
+    if (_measuring != spineIndex || _heights[spineIndex] == height) return;
+
     _heights[spineIndex] = height;
 
     final document = _document;
@@ -237,6 +383,8 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
   void _rebuildPagination() {
     final document = _document;
     final size = _contentSize;
+    final settings = _layoutSettings ?? _settings;
+
     if (document == null || size == null || size.height <= 0) return;
 
     final pagination = EpubPagination(
@@ -244,24 +392,36 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
       heights: Map<int, double>.from(_heights),
       spineLength: document.spine.length,
     );
+
     _pagination = pagination;
-    _laidOutWith = _settings;
     widget.epubController?.attachPagination(pagination);
 
-    // Restore the reading position once the pass that covers it is done.
+    if (!pagination.isComplete) return;
+
+    _flipController.updatePageCount(pagination.totalPages);
+
     final restore = _restoreTo;
     if (restore != null && pagination.isComplete) {
       _restoreTo = null;
-      final page = pagination.pageFor(restore);
+      final page = pagination
+          .pageFor(restore)
+          .clamp(0, mathMaxPage(pagination.totalPages))
+          .toInt();
+      _initialMeshPage = page;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           unawaited(_flipController.goToPage(page, animate: false));
         }
       });
     }
+    _layoutSettings = settings;
+
+    // A pending chapter jump may have arrived while the document was still
+    // being measured. Re-check it now that page numbers are stable.
+    _onEpubControllerChanged();
   }
 
-  // ── Build ─────────────────────────────────────────────────────────────────
+  // ── Build ───────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -297,30 +457,81 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
           (constraints.maxHeight - margin * 2).clamp(1.0, double.infinity),
         );
 
-        // Viewport or typography changed: re-measure from scratch.
-        if (_contentSize != contentSize || _laidOutWith != settings) {
-          final sizeChanged =
-              _contentSize != null && _contentSize != contentSize;
-          _contentSize = contentSize;
+        final needsLayoutReset =
+            _contentSize != contentSize || _layoutSettings != settings;
+
+        if (needsLayoutReset && !_layoutResetScheduled) {
+          _layoutResetScheduled = true;
+
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!mounted) return;
-            if (sizeChanged && _pagination != null && _restoreTo == null) {
-              _restoreTo = _pagination!.locatorAt(_flipController.currentPage);
+            _layoutResetScheduled = false;
+
+            // The requested layout may have changed again before this callback
+            // ran. Use the latest values only.
+            final latestSettings = _settings;
+            final latestMargin = latestSettings.margin;
+            final latestSize = Size(
+              (constraints.maxWidth - latestMargin * 2).clamp(
+                1.0,
+                double.infinity,
+              ),
+              (constraints.maxHeight - latestMargin * 2).clamp(
+                1.0,
+                double.infinity,
+              ),
+            );
+
+            if (_contentSize != null &&
+                _pagination != null &&
+                _pagination!.isComplete &&
+                _restoreTo == null) {
+              _restoreTo =
+                  _lastLocator ??
+                  _pagination!.locatorAt(_flipController.currentPage);
             }
-            if (_laidOutWith != settings || _heights.isEmpty) {
-              setState(() {
-                _heights.clear();
-                _chapterCache.clear();
-                _pagination = null;
-                _measuring = 0;
-              });
-            } else {
-              setState(_rebuildPagination);
-            }
+
+            _paginationGeneration++;
+            _meshGeneration++;
+            _contentSize = latestSize;
+            _layoutSettings = latestSettings;
+            _heights.clear();
+            _chapterCache.clear();
+            _pagination = null;
+            _measuring = 0;
+            _initialMeshPage = 0;
+
+            setState(() {});
           });
         }
 
         final pagination = _pagination;
+        final pageReady =
+            pagination != null &&
+            pagination.isComplete &&
+            pagination.totalPages > 0;
+
+        final pageIndicator = pageReady && widget.showPageIndicator
+            ? Positioned(
+                left: 0,
+                right: 0,
+                bottom: 12,
+                child: IgnorePointer(
+                  child: Center(
+                    child: ValueListenableBuilder<int>(
+                      valueListenable: _pageIndicatorPage,
+                      builder: (context, currentPage, child) => _PageIndicator(
+                        currentPage: currentPage,
+                        pageCount: pagination.totalPages,
+                      ),
+                    ),
+                  ),
+                ),
+              )
+            : const SizedBox.shrink();
+
+        final measuringIndex = _measuring;
+        final measurementGeneration = _paginationGeneration;
 
         return Stack(
           children: [
@@ -330,30 +541,28 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
                 child: pagination == null
                     ? (widget.loadingBuilder?.call(context) ??
                           const _DefaultEpubLoading())
-                    : FlipBookWidget(
-                        pageCount: pagination.totalPages,
+                    : MeshFlipBook(
+                        key: ValueKey(_meshGeneration),
                         controller: _flipController,
+                        pageCount: pagination.totalPages,
+                        initialPage: _initialMeshPage,
                         flip: widget.flip,
-                        showPageIndicator: widget.showPageIndicator,
                         backgroundColor: settings.theme.background,
                         pageBackColor: settings.theme.background,
-                        pageBuilder: (context, index, pageConstraints) =>
-                            _buildPage(
-                              context,
-                              document: document,
-                              pagination: pagination,
-                              settings: settings,
-                              globalPage: index,
-                              contentSize: contentSize,
-                            ),
+                        pageBuilder: _meshPageBuilder,
                       ),
               ),
             ),
 
+            pageIndicator,
+
             // Offstage measurement host. Laying the document out inside a
             // scroll view gives it unbounded height, so its natural height can
             // be read back.
-            if (_measuring != null && _measuring! < document.spine.length)
+            if (!pageReady &&
+                measuringIndex != null &&
+                measuringIndex >= 0 &&
+                measuringIndex < document.spine.length)
               Positioned(
                 left: -100000,
                 top: 0,
@@ -362,13 +571,18 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
                 child: IgnorePointer(
                   child: _MeasureHost(
                     key: ValueKey(
-                      'measure-$_measuring-${settings.fontSize}'
-                      '-${settings.lineHeight}-${contentSize.width}',
+                      'measure-$measurementGeneration-$measuringIndex-'
+                      '${settings.fontSize}-${settings.lineHeight}-'
+                      '${settings.margin}-${contentSize.width}',
                     ),
-                    onMeasured: (height) => _onMeasured(_measuring!, height),
+                    onMeasured: (height) => _onMeasured(
+                      measuringIndex,
+                      height,
+                      measurementGeneration,
+                    ),
                     child: EpubRenderer(
                       document: document,
-                      item: document.spine[_measuring!],
+                      item: document.spine[measuringIndex],
                       settings: settings,
                     ),
                   ),
@@ -377,6 +591,32 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
           ],
         );
       },
+    );
+  }
+
+  // ── Page construction ───────────────────────────────────────────────────────
+
+  Widget _buildMeshPage(
+    BuildContext context,
+    int index,
+    BoxConstraints pageConstraints,
+  ) {
+    final document = _document;
+    final pagination = _pagination;
+    if (document == null || pagination == null) {
+      return const SizedBox.shrink();
+    }
+
+    return _buildPage(
+      context,
+      document: document,
+      pagination: pagination,
+      settings: _settings,
+      globalPage: index,
+      // Pagination is measured against the margin-reduced content viewport.
+      // Do not pass the full MeshFlipBook viewport here or page offsets drift
+      // by the reader margin on every page.
+      contentSize: _contentSize ?? pageConstraints.biggest,
     );
   }
 
@@ -390,29 +630,41 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
     required int globalPage,
     required Size contentSize,
   }) {
+    if (globalPage < 0 || globalPage >= pagination.totalPages) {
+      return ColoredBox(color: settings.theme.background);
+    }
+
     final ref = pagination.resolve(globalPage);
     final item = document.spine[ref.spineIndex];
 
-    return ColoredBox(
-      color: settings.theme.background,
-      child: Padding(
-        padding: EdgeInsets.all(settings.margin),
-        child: ClipRect(
-          child: SizedBox(
-            width: contentSize.width,
-            height: contentSize.height,
-            child: OverflowBox(
-              alignment: Alignment.topLeft,
-              minHeight: 0,
-              maxHeight: double.infinity,
-              child: Transform.translate(
-                offset: Offset(0, -ref.offsetFor(contentSize.height)),
-                child: SizedBox(
-                  width: contentSize.width,
-                  child: _chapterFor(
-                    document: document,
-                    item: item,
-                    settings: settings,
+    final offset = ref.offsetFor(contentSize.height);
+
+    return SizedBox(
+      width: contentSize.width + settings.margin * 2,
+      height: contentSize.height + settings.margin * 2,
+      child: ColoredBox(
+        color: settings.theme.background,
+        child: Padding(
+          padding: EdgeInsets.all(settings.margin),
+          child: ClipRect(
+            child: SizedBox(
+              width: contentSize.width,
+              height: contentSize.height,
+              child: OverflowBox(
+                alignment: Alignment.topLeft,
+                minWidth: contentSize.width,
+                maxWidth: contentSize.width,
+                minHeight: 0,
+                maxHeight: double.infinity,
+                child: Transform.translate(
+                  offset: Offset(0, -offset),
+                  child: SizedBox(
+                    width: contentSize.width,
+                    child: _chapterFor(
+                      document: document,
+                      item: item,
+                      settings: settings,
+                    ),
                   ),
                 ),
               ),
@@ -423,11 +675,11 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
     );
   }
 
-  /// Returns the prepared subtree for a chapter, building it once.
+  /// Builds a chapter subtree for a page.
   ///
-  /// Returning an identical Widget instance is what makes repeated page builds
-  /// cheap: Flutter skips updating a subtree whose widget is the same object
-  /// it already holds.
+  /// No nested RepaintBoundary is used here so the chapter does not allocate an
+  /// unbounded off-screen texture layer; the outer MeshFlipBook PageCaptureHost
+  /// owns the page-sized boundary.
   Widget _chapterFor({
     required EpubDocument document,
     required EpubSpineItem item,
@@ -436,8 +688,10 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
     final cached = _chapterCache[item.index];
     if (cached != null) return cached;
 
-    final built = RepaintBoundary(
-      child: EpubRenderer(document: document, item: item, settings: settings),
+    final built = EpubRenderer(
+      document: document,
+      item: item,
+      settings: settings,
     );
     _chapterCache[item.index] = built;
     _evictDistantChapters(item.index);
@@ -452,6 +706,8 @@ class _FlipBookEpubState extends State<FlipBookEpub> {
     );
   }
 }
+
+int mathMaxPage(int pageCount) => pageCount <= 0 ? 0 : pageCount - 1;
 
 /// Lays a child out at its natural height and reports it after layout.
 class _MeasureHost extends StatefulWidget {
@@ -481,23 +737,29 @@ class _MeasureHostState extends State<_MeasureHost> {
   @override
   void didUpdateWidget(covariant _MeasureHost old) {
     super.didUpdateWidget(old);
+    if (old.child.key != widget.child.key) {
+      _reported = null;
+    }
     _scheduleMeasure();
   }
 
   void _scheduleMeasure() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+
       final box = _key.currentContext?.findRenderObject();
       if (box is! RenderBox || !box.hasSize) {
         // The HTML may still be building asynchronously; try again next frame.
         _scheduleMeasure();
         return;
       }
+
       final height = box.size.height;
       if (height <= 0) {
         _scheduleMeasure();
         return;
       }
+
       if (_reported == height) return;
       _reported = height;
       widget.onMeasured(height);
@@ -511,6 +773,36 @@ class _MeasureHostState extends State<_MeasureHost> {
     return SingleChildScrollView(
       physics: const NeverScrollableScrollPhysics(),
       child: KeyedSubtree(key: _key, child: widget.child),
+    );
+  }
+}
+
+class _PageIndicator extends StatelessWidget {
+  const _PageIndicator({required this.currentPage, required this.pageCount});
+
+  final int currentPage;
+  final int pageCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final page = (currentPage + 1).clamp(1, pageCount).toInt();
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xAA000000),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Text(
+          '$page / $pageCount',
+          style: const TextStyle(
+            color: Color(0xFFFFFFFF),
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ),
     );
   }
 }
