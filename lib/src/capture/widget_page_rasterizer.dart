@@ -1,8 +1,8 @@
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
-import 'package:meta/meta.dart';
 
 import 'package:flip_book/src/pages/page_texture.dart';
 
@@ -79,8 +79,11 @@ class WidgetPageRasterizer {
     if (renderObject is! RenderRepaintBoundary) return null;
 
     final boundary = renderObject;
+    // `debugNeedsPaint` throws in release builds, so it is only consulted in
+    // debug. In release an unpainted boundary makes `toImage` throw, which the
+    // catch below turns into the same retry-later `null`.
     if (!boundary.attached ||
-        boundary.debugNeedsPaint ||
+        (kDebugMode && boundary.debugNeedsPaint) ||
         !boundary.hasSize ||
         boundary.size.isEmpty) {
       return null;

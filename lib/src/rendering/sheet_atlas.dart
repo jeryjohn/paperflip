@@ -24,13 +24,25 @@ import 'package:flip_book/src/pages/page_texture.dart';
 @immutable
 @internal
 class SheetAtlas {
-  const SheetAtlas._({
+  SheetAtlas._({
     required this.image,
     required this.frontRegion,
     required this.backRegion,
     required this.logicalSize,
     required this.ownsImage,
-  });
+    PageTexture? borrowedFrom,
+  }) : _borrowedFrom = borrowedFrom;
+
+  /// The texture whose image a single-face atlas borrows, if any.
+  final PageTexture? _borrowedFrom;
+
+  /// Records disposal of an owned [image]. `ui.Image.debugDisposed` throws in
+  /// release builds, so it cannot be used to answer [isDisposed].
+  final DisposalFlag _disposal = DisposalFlag();
+
+  /// Whether [image] is no longer usable — either this atlas released it, or
+  /// the texture it borrows from was disposed.
+  bool get isDisposed => _disposal.value || (_borrowedFrom?.isDisposed ?? false);
 
   /// One image containing the front face on the left and the back face on the
   /// right, unless this is a single-face atlas.
@@ -77,6 +89,7 @@ class SheetAtlas {
         backRegion: front.region,
         logicalSize: front.logicalSize,
         ownsImage: false,
+        borrowedFrom: front,
       );
     }
 
@@ -170,9 +183,9 @@ class SheetAtlas {
   /// Single-face atlases borrow the front texture's image and therefore leave
   /// disposal to [PageTexture].
   void dispose() {
-    if (ownsImage && !image.debugDisposed) {
-      image.dispose();
-    }
+    if (!ownsImage || _disposal.value) return;
+    _disposal.value = true;
+    image.dispose();
   }
 
   @override
@@ -183,7 +196,7 @@ class SheetAtlas {
     PageTexture texture, {
     required String name,
   }) {
-    if (texture.isDisposed || texture.image.debugDisposed) {
+    if (texture.isDisposed) {
       throw StateError('Cannot pack disposed $name PageTexture.');
     }
 

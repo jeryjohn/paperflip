@@ -95,7 +95,7 @@ class PageCurlRenderer {
     lighting.apply(mesh, params);
 
     final indices = _orderTriangles(mesh, params);
-    final shader = _shaderFor(atlas.image);
+    final shader = _shaderFor(atlas);
     if (shader == null) return false;
 
     final vertices = ui.Vertices.raw(
@@ -137,7 +137,7 @@ class PageCurlRenderer {
     SheetAtlas atlas,
     CurlParameters params,
   ) {
-    if (atlas.image.debugDisposed) return false;
+    if (atlas.isDisposed) return false;
 
     final showBack = !atlas.isSingleFace && params.progress > 0.5;
     final region = showBack ? atlas.backRegion : atlas.frontRegion;
@@ -246,9 +246,10 @@ class PageCurlRenderer {
     return ordered;
   }
 
-  /// Returns a cached shader for [image].
-  ui.ImageShader? _shaderFor(ui.Image image) {
-    if (image.debugDisposed) return null;
+  /// Returns a cached shader for [atlas]'s image.
+  ui.ImageShader? _shaderFor(SheetAtlas atlas) {
+    if (atlas.isDisposed) return null;
+    final image = atlas.image;
 
     final cached = _shader;
     if (cached != null && identical(_shaderImage, image)) {
@@ -271,7 +272,7 @@ class PageCurlRenderer {
   }
 
   bool _invalidAtlas(SheetAtlas atlas) {
-    if (atlas.image.debugDisposed) return true;
+    if (atlas.isDisposed) return true;
 
     final size = atlas.logicalSize;
     if (size.isEmpty || !size.width.isFinite || !size.height.isFinite) {

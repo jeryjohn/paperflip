@@ -480,7 +480,8 @@ class _MeshFlipBookState extends State<MeshFlipBook>
   /// Showing the next page on the back would display it twice at once.
   Future<ui.Image> _paperTexture() async {
     final existing = _paperImage;
-    if (existing != null && !existing.debugDisposed) return existing;
+    // _paperImage is always nulled when disposed, so non-null means usable.
+    if (existing != null) return existing;
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     canvas.drawRect(

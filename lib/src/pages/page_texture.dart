@@ -58,6 +58,11 @@ class PageTexture {
           'textureRegion must be finite',
         );
 
+  /// Tracks disposal of [image]. `ui.Image.debugDisposed` throws in release
+  /// builds, so ownership is recorded here instead. A final reference to a
+  /// mutable box keeps the class shallowly immutable.
+  final DisposalFlag _disposal = DisposalFlag();
+
   /// The rendered pixels. Owned by this texture; see the class doc.
   final ui.Image image;
 
@@ -120,7 +125,7 @@ class PageTexture {
   int get approximateByteSize => image.width * image.height * 4;
 
   /// Whether the underlying image handle has been released.
-  bool get isDisposed => image.debugDisposed;
+  bool get isDisposed => _disposal.value;
 
   /// Returns an independently-owned handle to the same pixels.
   ///
@@ -200,14 +205,13 @@ class PageTexture {
   /// Safe to call twice; the second call is a no-op. Other handles created by
   /// [share] or [slice] are unaffected.
   void dispose() {
-    if (!image.debugDisposed) {
-      image.dispose();
-    }
+    if (_disposal.value) return;
+    _disposal.value = true;
+    image.dispose();
   }
 
   void _assertUsable() {
-    assert(!image.debugDisposed, 'PageTexture has already been disposed.');
-    if (image.debugDisposed) {
+    if (_disposal.value) {
       throw StateError('PageTexture has already been disposed.');
     }
   }
@@ -342,4 +346,10 @@ class PageFaceSet {
 
   @override
   String toString() => 'PageFaceSet(front: $front, back: $back)';
+}
+
+/// Mutable disposal marker held by otherwise-immutable handle classes.
+@internal
+class DisposalFlag {
+  bool value = false;
 }
