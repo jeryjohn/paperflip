@@ -48,6 +48,13 @@ class PageCurlRenderer {
 
   int _orderedTriangleCount = 0;
 
+  // Two-sided buffers for corner folds: every vertex twice, once sampling the
+  // front face and once the back, so each triangle can pick its own face.
+  Float32List? _faceTex;
+  Float32List? _facePositions;
+  Int32List? _faceColors;
+  Uint16List? _faceIndices;
+
   /// Computes deformation, normals, and perspective projection in one pass.
   ///
   /// Returns `false` when more than 30% of vertices clamp at an extreme perspective angle.
@@ -110,23 +117,38 @@ class PageCurlRenderer {
       if (!ok) return false;
     }
 
-    if (!_updateTextureCoordinates(mesh, atlas, params)) {
-      return false;
+    final twoSided =
+        params.isCornerFold &&
+        !atlas.isSingleFace &&
+        mesh.vertexCount * 2 <= 0x10000;
+
+    final ui.Vertices vertices;
+    if (twoSided) {
+      final built = _buildTwoSided(mesh, atlas, params, lighting);
+      if (built == null) return false;
+      vertices = built;
+    } else {
+      if (!_updateTextureCoordinates(mesh, atlas, params)) {
+        return false;
+      }
+
+      lighting.apply(mesh, params);
+
+      final indices = _orderTriangles(mesh, params);
+      vertices = ui.Vertices.raw(
+        ui.VertexMode.triangles,
+        mesh.positions,
+        textureCoordinates: mesh.textureCoordinates,
+        colors: mesh.colors,
+        indices: indices,
+      );
     }
 
-    lighting.apply(mesh, params);
-
-    final indices = _orderTriangles(mesh, params);
     final shader = _shaderFor(atlas);
-    if (shader == null) return false;
-
-    final vertices = ui.Vertices.raw(
-      ui.VertexMode.triangles,
-      mesh.positions,
-      textureCoordinates: mesh.textureCoordinates,
-      colors: mesh.colors,
-      indices: indices,
-    );
+    if (shader == null) {
+      vertices.dispose();
+      return false;
+    }
 
     _paint.shader = shader;
 
@@ -172,6 +194,102 @@ class PageCurlRenderer {
   }) {
     return direction < 0;
   }
+
+  /// Builds vertices where each triangle shows whichever face of the sheet is
+  /// actually toward the viewer.
+  ///
+  /// The spine curl can switch the whole sheet to its back at the midpoint
+  /// because the whole sheet rotates together. A corner peel cannot: the
+  /// folded-over flap shows the back of the paper while the rest of the same
+  /// sheet still shows the page. Facing is read from the projected winding,
+  /// which is exact for what ends up on screen.
+  ui.Vertices? _buildTwoSided(
+    PageCurlMesh mesh,
+    SheetAtlas atlas,
+    CurlParameters params,
+    PageCurlLighting lighting,
+  ) {
+    if (atlas.isDisposed) return null;
+    final n = mesh.vertexCount;
+
+    final front = atlas.frontRegion.deflate(0.5);
+    final back = atlas.backRegion.deflate(0.5);
+    if (front.width <= 0 || front.height <= 0) return null;
+    if (back.width <= 0 || back.height <= 0) return null;
+
+    final mirror = resolveMirrorHorizontally(
+      direction: params.direction,
+      showBack: false,
+    );
+
+    var tex = _faceTex;
+    if (tex == null || tex.length != n * 4) {
+      tex = _faceTex = Float32List(n * 4);
+      _facePositions = Float32List(n * 4);
+      _faceColors = Int32List(n * 2);
+      _faceIndices = Uint16List(mesh.triangleCount * 3);
+    }
+    final pos = _facePositions!;
+    final colors = _faceColors!;
+    final out = _faceIndices!;
+
+    mesh.updateTextureRegion(back, mirrorHorizontally: mirror);
+    tex.setRange(n * 2, n * 4, mesh.textureCoordinates);
+    mesh.updateTextureRegion(front, mirrorHorizontally: mirror);
+    tex.setRange(0, n * 2, mesh.textureCoordinates);
+
+    lighting.apply(mesh, params);
+    pos.setRange(0, n * 2, mesh.positions);
+    pos.setRange(n * 2, n * 4, mesh.positions);
+    colors.setRange(0, n, mesh.colors);
+    colors.setRange(n, n * 2, mesh.colors);
+
+    final ordered = _orderTriangles(mesh, params);
+    final p = mesh.positions;
+    final uv = mesh.normalized;
+
+    // Winding of the flat, unturned sheet. Forward and backward turns lay
+    // the grid out mirrored, which flips it.
+    final a0 = mesh.indices[0];
+    final b0 = mesh.indices[1];
+    final c0 = mesh.indices[2];
+    final flatSign =
+        _cross(
+          uv[a0 * 2], uv[a0 * 2 + 1],
+          uv[b0 * 2], uv[b0 * 2 + 1],
+          uv[c0 * 2], uv[c0 * 2 + 1],
+        ).sign *
+        (params.direction >= 0 ? 1.0 : -1.0);
+
+    for (var t = 0; t < mesh.triangleCount; t++) {
+      final a = ordered[t * 3];
+      final b = ordered[t * 3 + 1];
+      final c = ordered[t * 3 + 2];
+      final area = _cross(
+        p[a * 2], p[a * 2 + 1],
+        p[b * 2], p[b * 2 + 1],
+        p[c * 2], p[c * 2 + 1],
+      );
+      final offset = area * flatSign < 0 ? n : 0;
+      out[t * 3] = a + offset;
+      out[t * 3 + 1] = b + offset;
+      out[t * 3 + 2] = c + offset;
+    }
+
+    return ui.Vertices.raw(
+      ui.VertexMode.triangles,
+      pos,
+      textureCoordinates: tex,
+      colors: colors,
+      indices: out,
+    );
+  }
+
+  static double _cross(
+    double ax, double ay,
+    double bx, double by,
+    double cx, double cy,
+  ) => (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
 
   /// Points every vertex at the appropriate sheet-face region.
   ///
@@ -364,6 +482,10 @@ class PageCurlRenderer {
 
     _orderedIndices = null;
     _orderedTriangleCount = 0;
+    _faceTex = null;
+    _facePositions = null;
+    _faceColors = null;
+    _faceIndices = null;
     _paint.shader = null;
   }
 }
@@ -471,6 +593,11 @@ class PageCurlShadow {
   }) {
     if (params.isFlat || opacity <= 0) return;
 
+    if (params.isCornerFold) {
+      _paintCornerShadow(canvas, mesh.pageSize, params, origin);
+      return;
+    }
+
     final lift = PageCurlLighting.peakLift(mesh);
     if (lift <= 0.5) return;
 
@@ -493,6 +620,69 @@ class PageCurlShadow {
             );
 
     canvas.drawPath(path, paint);
+  }
+
+  /// Soft shadow the roll casts onto the revealed page, along the crease.
+  ///
+  /// The roll's silhouette reaches `R` past the crease line; the shadow starts
+  /// there and fades out over a short band. Everything on the other side is
+  /// under the sheet and hidden anyway.
+  void _paintCornerShadow(
+    Canvas canvas,
+    Size pageSize,
+    CurlParameters params,
+    Offset origin,
+  ) {
+    final f = CornerFoldFrame.resolve(params, pageSize);
+    if (f == null) return;
+
+    // Fade in with the size of the roll, so a barely-lifted corner and the
+    // final flat landing carry no shadow.
+    final envelope = PageCurlGeometry.smoothstep(
+      f.radius / (CornerFoldFrame.maxRadiusFraction * f.leafWidth * 0.5),
+    );
+    if (envelope <= 0.01) return;
+
+    // Crease normal and start point in screen space.
+    final nx = f.dir * f.mx;
+    final ny = f.my;
+    final sx = f.spineX + f.dir * (f.axisX + f.mx * f.radius);
+    final sy = f.axisY + f.my * f.radius;
+    final width = f.leafWidth * 0.08 + f.radius * 0.6;
+
+    final start = origin + Offset(sx, sy);
+    final end = start + Offset(nx * width, ny * width);
+    final alpha = opacity * envelope;
+
+    // Half-plane on the revealed side of the start line, clipped to the page.
+    final page = origin & pageSize;
+    final big = pageSize.longestSide * 4;
+    final tangent = Offset(-ny, nx);
+    final normal = Offset(nx, ny);
+    final band = Path()
+      ..moveTo(start.dx + tangent.dx * big, start.dy + tangent.dy * big)
+      ..lineTo(start.dx - tangent.dx * big, start.dy - tangent.dy * big)
+      ..lineTo(
+        start.dx - tangent.dx * big + normal.dx * big,
+        start.dy - tangent.dy * big + normal.dy * big,
+      )
+      ..lineTo(
+        start.dx + tangent.dx * big + normal.dx * big,
+        start.dy + tangent.dy * big + normal.dy * big,
+      )
+      ..close();
+
+    final paint = Paint()
+      ..shader = ui.Gradient.linear(start, end, [
+        Color.fromRGBO(0, 0, 0, alpha),
+        const Color(0x00000000),
+      ]);
+
+    canvas
+      ..save()
+      ..clipRect(page)
+      ..drawPath(band, paint)
+      ..restore();
   }
 
   /// Builds a polygon from the sheet's free edge back to the spine.

@@ -18,6 +18,8 @@ class CurlParameters {
     this.tiltAmount = defaultTiltAmount,
     this.conicity = 0.0,
     this.droop = defaultDroop,
+    this.cornerEdge = 0,
+    this.cornerLift = 0.0,
   });
 
   /// Flat, unturned page.
@@ -68,6 +70,20 @@ class CurlParameters {
   /// Free-corner sag as a fraction of page height.
   final double droop;
 
+  /// Which corner of the free edge is being peeled.
+  ///
+  /// `0` (the default) keeps the spine-hinged cone curl. `-1` peels the top
+  /// corner and `1` the bottom corner along a diagonal crease — the way paper
+  /// folds when it is lifted by a corner. Discrete, like [direction].
+  final int cornerEdge;
+
+  /// Vertical displacement of the grabbed corner, as a fraction of page
+  /// height (positive = down). Only meaningful when [cornerEdge] is non-zero.
+  final double cornerLift;
+
+  /// Whether this turn is a diagonal corner peel rather than a spine curl.
+  bool get isCornerFold => cornerEdge != 0;
+
   /// Whether the state is the exact initial flat state.
   ///
   /// Progress `1` is intentionally **not** considered flat here. At the end of
@@ -101,6 +117,8 @@ class CurlParameters {
     double tiltAmount = defaultTiltAmount,
     double droop = defaultDroop,
     double conicStrength = 0.85,
+    int cornerEdge = 0,
+    double cornerLift = 0.0,
   }) {
     return CurlParameters(
       progress: _finiteClamp(progress, 0.0, 1.0),
@@ -110,6 +128,10 @@ class CurlParameters {
       tiltAmount: _finiteNonNegative(tiltAmount),
       conicity: resolveConicity(grabV, strength: conicStrength),
       droop: _finiteNonNegative(droop),
+      cornerEdge: cornerEdge.sign,
+      cornerLift: cornerLift.isFinite
+          ? cornerLift.clamp(-1.0, 1.0).toDouble()
+          : 0.0,
     );
   }
 
@@ -121,6 +143,8 @@ class CurlParameters {
     double? tiltAmount,
     double? conicity,
     double? droop,
+    int? cornerEdge,
+    double? cornerLift,
   }) => CurlParameters(
     progress: progress ?? this.progress,
     grabV: grabV ?? this.grabV,
@@ -129,11 +153,13 @@ class CurlParameters {
     tiltAmount: tiltAmount ?? this.tiltAmount,
     conicity: conicity ?? this.conicity,
     droop: droop ?? this.droop,
+    cornerEdge: cornerEdge ?? this.cornerEdge,
+    cornerLift: cornerLift ?? this.cornerLift,
   );
 
   /// Linear interpolation of the animated geometric fields.
   ///
-  /// Direction is discrete and therefore follows [b].
+  /// Direction and [cornerEdge] are discrete and therefore follow [b].
   static CurlParameters lerp(CurlParameters a, CurlParameters b, double t) {
     if (t <= 0) return a;
     if (t >= 1) return b;
@@ -148,6 +174,8 @@ class CurlParameters {
       tiltAmount: mix(a.tiltAmount, b.tiltAmount),
       conicity: mix(a.conicity, b.conicity),
       droop: mix(a.droop, b.droop),
+      cornerEdge: b.cornerEdge,
+      cornerLift: mix(a.cornerLift, b.cornerLift),
     );
   }
 
@@ -159,8 +187,11 @@ class CurlParameters {
     distance = math.max(distance, (bendAmount - other.bendAmount).abs());
     distance = math.max(distance, (tiltAmount - other.tiltAmount).abs());
     distance = math.max(distance, (droop - other.droop).abs());
+    distance = math.max(distance, (cornerLift - other.cornerLift).abs());
 
-    return direction == other.direction ? distance : double.infinity;
+    return direction == other.direction && cornerEdge == other.cornerEdge
+        ? distance
+        : double.infinity;
   }
 
   @override
@@ -173,7 +204,9 @@ class CurlParameters {
           other.bendAmount == bendAmount &&
           other.tiltAmount == tiltAmount &&
           other.conicity == conicity &&
-          other.droop == droop;
+          other.droop == droop &&
+          other.cornerEdge == cornerEdge &&
+          other.cornerLift == cornerLift;
 
   @override
   int get hashCode => Object.hash(
@@ -184,14 +217,20 @@ class CurlParameters {
     tiltAmount,
     conicity,
     droop,
+    cornerEdge,
+    cornerLift,
   );
 
   @override
-  String toString() =>
-      'CurlParameters(t: ${progress.toStringAsFixed(3)}, '
-      'grabV: ${grabV.toStringAsFixed(2)}, '
-      'dir: $direction, '
-      'conicity: ${conicity.toStringAsFixed(2)})';
+  String toString() {
+    final corner = isCornerFold
+        ? ', corner: $cornerEdge, lift: ${cornerLift.toStringAsFixed(2)}'
+        : '';
+    return 'CurlParameters(t: ${progress.toStringAsFixed(3)}, '
+        'grabV: ${grabV.toStringAsFixed(2)}, '
+        'dir: $direction, '
+        'conicity: ${conicity.toStringAsFixed(2)}$corner)';
+  }
 
   static double _finiteClamp(double value, double min, double max) {
     if (!value.isFinite) return min;
@@ -265,7 +304,8 @@ class CurlSmoother {
 
     // Direction is discrete. Crossing through zero between opposite directions
     // would invent a physically meaningless half-forward/half-backward state.
-    if (current.direction != target.direction) {
+    if (current.direction != target.direction ||
+        current.cornerEdge != target.cornerEdge) {
       _displayed = target;
       return true;
     }

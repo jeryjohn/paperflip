@@ -590,4 +590,134 @@ void main() {
       expect(smoother.advance(1 / 60), isFalse);
     });
   });
+
+  group('corner peel', () {
+    CurlParameters corner({
+      required double progress,
+      int edge = 1,
+      double lift = 0,
+      int direction = 1,
+    }) =>
+        CurlParameters.forGesture(
+          progress: progress,
+          grabV: edge < 0 ? 0.1 : 0.9,
+          direction: direction,
+          droop: 0,
+          cornerEdge: edge,
+          cornerLift: lift,
+        );
+
+    const lifts = <double>[-0.3, 0.0, 0.2];
+
+    test('starts exactly flat', () {
+      final mesh = _mesh();
+      geometry.deform(mesh, corner(progress: 0));
+      for (var i = 0; i < mesh.vertexCount; i++) {
+        expect(mesh.worldPositions[i * 3 + 2], 0);
+      }
+    });
+
+    test('lands exactly on the far side of the spine', () {
+      for (final edge in [-1, 1]) {
+        for (final lift in lifts) {
+          final mesh = _mesh();
+          geometry.deform(
+            mesh,
+            corner(progress: 1, edge: edge, lift: lift),
+          );
+          for (var row = 0; row <= mesh.rows; row++) {
+            for (var col = 0; col <= mesh.columns; col++) {
+              final i = mesh.vertexIndex(col, row);
+              final x = col / mesh.columns * _pageSize.width;
+              final y = row / mesh.rows * _pageSize.height;
+              expect(mesh.worldPositions[i * 3], closeTo(-x, 1e-3));
+              expect(mesh.worldPositions[i * 3 + 1], closeTo(y, 1e-3));
+              expect(mesh.worldPositions[i * 3 + 2], closeTo(0, 1e-3));
+            }
+          }
+        }
+      }
+    });
+
+    test('never tears the page off the spine', () {
+      final mesh = _mesh();
+      for (final progress in _progresses) {
+        for (final edge in [-1, 1]) {
+          for (final lift in lifts) {
+            geometry.deform(
+              mesh,
+              corner(progress: progress, edge: edge, lift: lift),
+            );
+            for (var row = 0; row <= mesh.rows; row++) {
+              final i = mesh.vertexIndex(0, row);
+              expect(
+                mesh.worldPositions[i * 3],
+                closeTo(0, 1e-3),
+                reason: 'spine moved at p=$progress edge=$edge lift=$lift',
+              );
+              expect(mesh.worldPositions[i * 3 + 2], closeTo(0, 1e-3));
+            }
+          }
+        }
+      }
+    });
+
+    test('only the grabbed corner lifts early in the turn', () {
+      final mesh = _mesh();
+      geometry.deform(mesh, corner(progress: 0.15));
+      final grabbed = mesh.vertexIndex(mesh.columns, mesh.rows);
+      final opposite = mesh.vertexIndex(mesh.columns, 0);
+      expect(mesh.worldPositions[grabbed * 3 + 2], greaterThan(1));
+      expect(mesh.worldPositions[opposite * 3 + 2], 0);
+    });
+
+    test('is developable mid-turn', () {
+      final mesh = _mesh(columns: 48);
+      for (final progress in [0.25, 0.5, 0.75]) {
+        for (final lift in lifts) {
+          geometry.deform(mesh, corner(progress: progress, lift: lift));
+          expect(
+            PageCurlGeometry.debugMaxIsometryError(mesh),
+            lessThan(1e-2),
+            reason: 'corner peel stretched at p=$progress lift=$lift',
+          );
+        }
+      }
+    });
+
+    test('a backward peel mirrors a forward one', () {
+      final forward = _mesh();
+      final backward = _mesh();
+      geometry.deform(forward, corner(progress: 0.4, lift: 0.1));
+      geometry.deform(
+        backward,
+        corner(progress: 0.4, lift: 0.1, direction: -1),
+      );
+      for (var i = 0; i < forward.vertexCount; i++) {
+        expect(
+          forward.worldPositions[i * 3],
+          closeTo(_pageSize.width - backward.worldPositions[i * 3], 1e-3),
+        );
+        expect(
+          forward.worldPositions[i * 3 + 2],
+          closeTo(backward.worldPositions[i * 3 + 2], 1e-3),
+        );
+      }
+    });
+
+    test('stays finite everywhere', () {
+      final mesh = _mesh();
+      for (final progress in _progresses) {
+        for (final edge in [-1, 1]) {
+          for (final lift in [-1.0, -0.3, 0.0, 0.4, 1.0]) {
+            final params = corner(progress: progress, edge: edge, lift: lift);
+            geometry
+              ..deform(mesh, params)
+              ..computeNormals(mesh);
+            expect(PageCurlGeometry.debugValidate(mesh, params), isNull);
+          }
+        }
+      }
+    });
+  });
 }

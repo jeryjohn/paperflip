@@ -15,6 +15,7 @@ import 'package:flip_book/src/pages/page_texture.dart';
 import 'package:flip_book/src/rendering/curl_parameters.dart';
 import 'package:flip_book/src/rendering/flip_scene.dart';
 import 'package:flip_book/src/rendering/page_curl_camera.dart';
+import 'package:flip_book/src/rendering/page_curl_geometry.dart';
 import 'package:flip_book/src/rendering/page_curl_mesh.dart';
 import 'package:flip_book/src/rendering/page_curl_renderer.dart';
 import 'package:flip_book/src/rendering/sheet_atlas.dart';
@@ -60,7 +61,8 @@ class MeshFlipBook extends StatefulWidget {
     this.debugShowMesh = false,
     this.contentVersion = 0,
     this.useVolumeKeys = false,
-  });
+    this.cornerGrabZone = 0.28,
+  }) : assert(cornerGrabZone >= 0 && cornerGrabZone <= 0.5);
 
   /// Total number of pages.
   final int pageCount;
@@ -113,6 +115,14 @@ class MeshFlipBook extends StatefulWidget {
   /// the previous page using the physical curl animation.
   /// Defaults to `false`.
   final bool useVolumeKeys;
+
+  /// Fraction of the page height, at the top and at the bottom, where a grab
+  /// peels the corner along a diagonal crease instead of curling the whole
+  /// sheet around the spine.
+  ///
+  /// Grabs in the middle band keep the spine curl. Programmatic flips that
+  /// name a corner use the corner peel. `0` disables corner peels entirely.
+  final double cornerGrabZone;
 
   @override
   State<MeshFlipBook> createState() => MeshFlipBookState();
@@ -182,6 +192,18 @@ class MeshFlipBookState extends State<MeshFlipBook>
   bool _dragging = false;
   double _grabV = 0.5;
   double _rawProgress = 0.0;
+
+  /// `0` spine curl, `-1` top-corner peel, `1` bottom-corner peel.
+  int _cornerEdge = 0;
+
+  /// Finger's vertical travel since grab, as a fraction of page height.
+  double _cornerLift = 0.0;
+
+  // On release the finger's vertical offset is eased out over the settle, so
+  // a cancelled peel returns to exactly flat and a completed one lands flat.
+  double _liftAtRelease = 0.0;
+  double _settleFrom = 0.0;
+  double _settleToValue = 0.0;
 
   /// A button/volume-key turn has been set up and is waiting one frame for
   /// its first curl frame to reach the screen before its clock starts.
@@ -366,6 +388,9 @@ class MeshFlipBookState extends State<MeshFlipBook>
     _dragging = false;
     _programmaticStartPending = false;
     _rawProgress = 0.0;
+    _cornerEdge = 0;
+    _cornerLift = 0.0;
+    _liftAtRelease = 0.0;
     _settleCompletionTarget = null;
     _roles = null;
     _smoother.reset(CurlParameters.rest);
@@ -717,6 +742,8 @@ class MeshFlipBookState extends State<MeshFlipBook>
       // The vertical grab position is what distinguishes a corner pull from a
       // centre pull, and it is the one thing the previous renderer discarded.
       _grabV = (start.dy / _pageSize.height).clamp(0.0, 1.0).toDouble();
+      _cornerEdge = _cornerEdgeFor(_grabV);
+      _cornerLift = 0.0;
       _dragDecided = true;
       _dragging = true;
 
@@ -741,7 +768,20 @@ class MeshFlipBookState extends State<MeshFlipBook>
     if (!_dragging) return;
     final travelled = (details.localPosition.dx - start.dx).abs();
     _rawProgress = (travelled / _pageSize.width).clamp(0.0, 1.0).toDouble();
+    if (_cornerEdge != 0) {
+      _cornerLift = ((details.localPosition.dy - start.dy) / _pageSize.height)
+          .clamp(-1.0, 1.0)
+          .toDouble();
+    }
     _smoother.setTarget(_curlFor(_rawProgress, _roles!.direction));
+  }
+
+  int _cornerEdgeFor(double grabV) {
+    final zone = widget.cornerGrabZone;
+    if (zone <= 0) return 0;
+    if (grabV <= zone) return -1;
+    if (grabV >= 1.0 - zone) return 1;
+    return 0;
   }
 
   void _onPanEnd(DragEndDetails details) {
@@ -771,6 +811,8 @@ class MeshFlipBookState extends State<MeshFlipBook>
         progress: progress,
         grabV: _grabV,
         direction: direction,
+        cornerEdge: _cornerEdge,
+        cornerLift: _cornerLift,
       );
 
   /// Springs the curl to [target], preserving the gesture's velocity.
@@ -783,11 +825,15 @@ class MeshFlipBookState extends State<MeshFlipBook>
     if (roles == null) return;
 
     final from = _smoother.target.progress;
+    _settleFrom = from;
+    _settleToValue = target;
+    _liftAtRelease = _cornerLift;
     _settleCompletionTarget = null;
     _controller?.reportAnimating(true);
     _startTicking();
 
     if ((target - from).abs() < 1e-3) {
+      _cornerLift = 0.0;
       // Still let the display smoother consume the exact final target.
       _smoother.setTarget(_curlFor(target, roles.direction));
       _settleCompletionTarget = target;
@@ -845,6 +891,13 @@ class MeshFlipBookState extends State<MeshFlipBook>
     final roles = _roles;
     if (roles == null) return;
     final progress = _settle.value.clamp(0.0, 1.0).toDouble();
+    if (_liftAtRelease != 0.0) {
+      final span = _settleToValue - _settleFrom;
+      final done = span.abs() < 1e-6
+          ? 1.0
+          : ((progress - _settleFrom) / span).clamp(0.0, 1.0).toDouble();
+      _cornerLift = _liftAtRelease * (1.0 - PageCurlGeometry.smoothstep(done));
+    }
     _smoother.setTarget(_curlFor(progress, roles.direction));
   }
 
@@ -853,6 +906,7 @@ class MeshFlipBookState extends State<MeshFlipBook>
     if (status == AnimationStatus.completed ||
         status == AnimationStatus.dismissed) {
       final target = _settle.value.clamp(0.0, 1.0).toDouble();
+      _cornerLift = 0.0;
       _settleCompletionTarget = target;
       _smoother.setTarget(_curlFor(target, _roles?.direction ?? 1));
       _startTicking();
@@ -865,6 +919,8 @@ class MeshFlipBookState extends State<MeshFlipBook>
     final roles = _roles;
     _roles = null;
     _rawProgress = 0.0;
+    _cornerLift = 0.0;
+    _liftAtRelease = 0.0;
     _settleCompletionTarget = null;
     _smoother.reset(CurlParameters.rest);
     _scene.rest();
@@ -963,6 +1019,8 @@ class MeshFlipBookState extends State<MeshFlipBook>
           case FlipCorner.bottomLeft:
             _grabV = 0.85;
         }
+        _cornerEdge = _cornerEdgeFor(_grabV);
+        _cornerLift = 0.0;
 
         _roles = roles;
         final initialCurl = _curlFor(0.0, roles.direction);
