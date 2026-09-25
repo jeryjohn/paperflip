@@ -99,8 +99,9 @@ class MeshFlipBook extends StatefulWidget {
   final bool debugShowMesh;
 
   /// Identifies a change in the page content that should invalidate captured
-  /// textures. Document sources such as EPUB should increment this when their
-  /// pagination/layout changes.
+  /// textures. Changing [pageBuilder] alone does not: bump this instead when
+  /// the pages themselves change. Document sources such as EPUB should
+  /// increment this when their pagination/layout changes.
   ///
   /// This is deliberately separate from widget identity because a page builder
   /// can remain the same function while the document it renders changes.
@@ -182,6 +183,14 @@ class MeshFlipBookState extends State<MeshFlipBook>
   double _grabV = 0.5;
   double _rawProgress = 0.0;
 
+  /// A button/volume-key turn has been set up and is waiting one frame for
+  /// its first curl frame to reach the screen before its clock starts.
+  bool _programmaticStartPending = false;
+
+  /// [MeshFlipBook.flip] with the controller's runtime overrides applied.
+  FlipSettings get _flipSettings =>
+      _controller?.applyFlipOverrides(widget.flip) ?? widget.flip;
+
   Duration _lastTick = Duration.zero;
   int _captureGeneration = 0;
 
@@ -252,9 +261,14 @@ class MeshFlipBookState extends State<MeshFlipBook>
     final captureRatioChanged =
         oldWidget.capturePixelRatio != widget.capturePixelRatio;
     final meshChanged = oldWidget.meshColumns != widget.meshColumns;
-    final sourceChanged =
-        oldWidget.pageBuilder != widget.pageBuilder ||
-        oldWidget.contentVersion != widget.contentVersion;
+    // Only an explicit contentVersion bump invalidates captured pages. A new
+    // pageBuilder *object* is not a content change: callers almost always
+    // pass an inline closure, which is a fresh object on every parent
+    // rebuild. Treating that as new content cancelled the turn in progress
+    // and re-captured every page each time the parent rebuilt — e.g. after
+    // every committed flip when the app mirrors the page number in setState.
+    // The live page still rebuilds with the new builder as normal.
+    final sourceChanged = oldWidget.contentVersion != widget.contentVersion;
     final pageBackChanged = oldWidget.pageBackColor != widget.pageBackColor;
 
     if (captureRatioChanged ||
@@ -350,6 +364,7 @@ class MeshFlipBookState extends State<MeshFlipBook>
     _dragStart = null;
     _dragDecided = false;
     _dragging = false;
+    _programmaticStartPending = false;
     _rawProgress = 0.0;
     _settleCompletionTarget = null;
     _roles = null;
@@ -673,14 +688,22 @@ class MeshFlipBookState extends State<MeshFlipBook>
   // ── Gestures ──────────────────────────────────────────────────────────────
 
   void _onPanStart(DragStartDetails details) {
-    if (!widget.flip.enabled || _settle.isAnimating) return;
+    if (!_flipSettings.enabled ||
+        _settle.isAnimating ||
+        _programmaticStartPending) {
+      return;
+    }
     _dragStart = details.localPosition;
     _dragDecided = false;
     _dragging = false;
   }
 
   void _onPanUpdate(DragUpdateDetails details) {
-    if (!widget.flip.enabled || _settle.isAnimating) return;
+    if (!_flipSettings.enabled ||
+        _settle.isAnimating ||
+        _programmaticStartPending) {
+      return;
+    }
     final start = _dragStart;
     if (start == null || _pageSize.isEmpty) return;
 
@@ -782,6 +805,42 @@ class MeshFlipBookState extends State<MeshFlipBook>
     );
   }
 
+  /// Runs a whole button/volume-key turn over [FlipSettings.duration].
+  ///
+  /// Drag releases use a spring because they inherit the finger's momentum
+  /// and usually have little distance left. A programmatic turn starts from
+  /// rest and covers the entire sheet; a critically damped spring from rest
+  /// is half-way over in ~110 ms, which reads as the page just snapping to
+  /// the next one. It also ignored `FlipSettings.duration` / `curve`.
+  ///
+  /// The clock starts a frame late on purpose: the first frame of a turn
+  /// rebuilds the live page underneath, and on a slow device that frame can
+  /// take long enough that a time-based animation would skip its opening.
+  void _startProgrammaticTurn() {
+    final settings = _flipSettings;
+    _programmaticStartPending = true;
+    _settleCompletionTarget = null;
+    _controller?.reportAnimating(true);
+    _startTicking();
+
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_programmaticStartPending) return;
+      _programmaticStartPending = false;
+      if (_roles == null) return;
+      _settle.value = 0.0;
+      _startTicking();
+      // Completion is handled by _onSettleStatus, exactly like a drag.
+      unawaited(
+        _settle.animateTo(
+          1.0,
+          duration: settings.duration,
+          curve: settings.curve,
+        ),
+      );
+    });
+    SchedulerBinding.instance.ensureVisualUpdate();
+  }
+
   void _onSettleTick() {
     final roles = _roles;
     if (roles == null) return;
@@ -841,7 +900,10 @@ class MeshFlipBookState extends State<MeshFlipBook>
     try {
       final controller = _controller;
       if (controller == null || !mounted) return;
-      if (_dragging || _settle.isAnimating || _settleCompletionTarget != null) {
+      if (_dragging ||
+          _programmaticStartPending ||
+          _settle.isAnimating ||
+          _settleCompletionTarget != null) {
         return;
       }
 
@@ -857,7 +919,7 @@ class MeshFlipBookState extends State<MeshFlipBook>
           continue;
         }
 
-        if (!intent.animate || !widget.flip.enabled) {
+        if (!intent.animate || !_flipSettings.enabled) {
           controller.clearIntent();
           setState(() => _currentPage = target);
           controller.reportPage(_currentPage);
@@ -910,7 +972,7 @@ class MeshFlipBookState extends State<MeshFlipBook>
           _scene.commit(curl: initialCurl, active: true, atlas: atlas);
         }
         setState(() {});
-        _settleTo(1.0);
+        _startProgrammaticTurn();
         return;
       }
     } finally {

@@ -82,14 +82,14 @@ class PageCurlGeometry {
 
     final t = _finiteClamp(params.progress, 0.0, 1.0);
 
+    final dir = params.direction >= 0 ? 1.0 : -1.0;
+
     // Exact resting state. This must match the live page pixel-for-pixel at
     // the moment the curl starts.
-    if (t <= 0.0) {
+    if (t <= 0.0 && dir > 0 && !spineAtCentre) {
       mesh.resetToFlat();
       return;
     }
-
-    final dir = params.direction >= 0 ? 1.0 : -1.0;
     final b = bump(t);
 
     final bendAmount = _finiteNonNegative(params.bendAmount);

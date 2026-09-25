@@ -445,6 +445,63 @@ void main() {
     });
 
     group('button and programmatic navigation animation pipeline', () {
+      testWidgets('a button turn runs for FlipSettings.duration, not a snap',
+          (tester) async {
+        final controller = FlipBookController();
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          _book(controller: controller, pageCount: 5, initialPage: 1),
+        );
+        await tester.pumpAndSettle();
+
+        final state =
+            tester.state<MeshFlipBookState>(find.byType(MeshFlipBook));
+
+        controller.flipNext();
+        await tester.pump(); // turn set up; clock starts after this frame
+        await tester.pump(const Duration(milliseconds: 16));
+
+        // Default duration is 600 ms. A spring from rest was already past
+        // half-way at ~110 ms, which is what read as an instant flip.
+        await tester.pump(const Duration(milliseconds: 150));
+        expect(controller.isAnimating, isTrue);
+        expect(state.debugScene.curl.progress, lessThan(0.5));
+        expect(controller.currentPage, 1);
+
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(controller.isAnimating, isTrue);
+        expect(state.debugScene.curl.progress, greaterThan(0.05));
+
+        await tester.pumpAndSettle();
+        expect(controller.currentPage, 2);
+      });
+
+      testWidgets('a parent rebuild with a new pageBuilder closure does not '
+          'cancel a turn', (tester) async {
+        final controller = FlipBookController();
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          _book(controller: controller, pageCount: 5, initialPage: 1),
+        );
+        await tester.pumpAndSettle();
+
+        controller.flipNext();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+
+        // Same widget, fresh inline closure — what a parent setState does.
+        await tester.pumpWidget(
+          _book(controller: controller, pageCount: 5, initialPage: 1),
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(controller.isAnimating, isTrue);
+
+        await tester.pumpAndSettle();
+        expect(controller.currentPage, 2);
+      });
+
       testWidgets('Next button animates progress continuously while current page remains stable',
           (tester) async {
         final controller = FlipBookController();
@@ -539,6 +596,43 @@ void main() {
         expect(controller.isAnimating, isFalse);
         expect(controller.currentPage, 1,
             reason: 'Destination page committed only after animation completes');
+      });
+
+      testWidgets(
+          'backward programmatic turn maintains unmirrored geometry and direction at progress 0.0',
+          (tester) async {
+        final controller = FlipBookController();
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          _book(controller: controller, pageCount: 5, initialPage: 2),
+        );
+        await tester.pumpAndSettle();
+
+        // Trigger backward flip
+        controller.flipPrev();
+        // First frame: intent consumed, roles resolved, initial curl set to progress 0.0
+        await tester.pump();
+
+        final state = tester.state<MeshFlipBookState>(find.byType(MeshFlipBook));
+        final scene = state.debugScene;
+        expect(scene.active, isTrue);
+        expect(scene.curl.direction, -1);
+        expect(scene.curl.progress, 0.0);
+
+        // Verify that at progress 0.0 for a backward turn, the mesh is positioned
+        // continuously with the curl deformation (spine at width, free edge at 0).
+        final mesh = PageCurlMesh(columns: 4, rows: 4, pageSize: const Size(100, 200));
+        const geometry = PageCurlGeometry();
+        geometry.deform(mesh, scene.curl);
+
+        final xSpine = mesh.worldPositions[0]; // col=0
+        final xFreeEdge = mesh.worldPositions[mesh.columns * 3]; // col=cols
+        expect(xSpine, closeTo(100.0, 1e-4));
+        expect(xFreeEdge, closeTo(0.0, 1e-4));
+
+        await tester.pumpAndSettle();
+        expect(controller.currentPage, 1);
       });
 
       testWidgets('first page + Previous does not navigate or animate',

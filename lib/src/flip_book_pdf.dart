@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import 'package:flip_book/src/flip_book_controller.dart';
+import 'package:flip_book/src/flip_book_widget.dart' show FlipPageBuilder;
 import 'package:flip_book/src/flip_settings.dart';
 import 'package:flip_book/src/mesh_flip_book.dart';
 
@@ -72,6 +73,30 @@ class _FlipBookPdfState extends State<FlipBookPdf> {
 
   int _loadGeneration = 0;
   FlipBookController? _internalController;
+
+  /// One builder for the lifetime of this state.
+  ///
+  /// [MeshFlipBook] treats a new `pageBuilder` as new content: it cancels any
+  /// turn in progress and throws away every captured page. An inline closure
+  /// is a new object on every build, so any ancestor rebuild (FlipBookReader
+  /// calls setState after every page turn and when its controls auto-hide)
+  /// was cancelling queued flips and forcing a full re-capture. A document
+  /// change is signalled with `contentVersion` instead.
+  late final FlipPageBuilder _pageBuilder = _buildPage;
+
+  Widget _buildPage(
+    BuildContext context,
+    int index,
+    BoxConstraints constraints,
+  ) {
+    final document = _document;
+    if (document == null) return const SizedBox.shrink();
+    return _PdfPageContent(
+      document: document,
+      pageIndex: index,
+      constraints: constraints,
+    );
+  }
 
   @override
   void initState() {
@@ -214,17 +239,8 @@ class _FlipBookPdfState extends State<FlipBookPdf> {
       backgroundColor: widget.backgroundColor,
       pageBackColor: widget.pageBackColor,
       useVolumeKeys: widget.useVolumeKeys,
-      pageBuilder: (
-        context,
-        index,
-        constraints,
-      ) {
-        return _PdfPageContent(
-          document: document,
-          pageIndex: index,
-          constraints: constraints,
-        );
-      },
+      pageBuilder: _pageBuilder,
+      contentVersion: _loadGeneration,
     );
 
     if (!widget.showPageIndicator || effectiveController == null) {
