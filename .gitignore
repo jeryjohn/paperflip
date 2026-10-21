@@ -1,0 +1,123 @@
+# ------------------------------------------------------------------------------
+# Miscellaneous & OS
+# ------------------------------------------------------------------------------
+.DS_Store
+**/.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+migrate_working_dir/
+*.class
+*.pyc
+*.swp
+*~
+*.log
+flutter_*.log
+
+# ------------------------------------------------------------------------------
+# IDEs & Editors
+# ------------------------------------------------------------------------------
+# IntelliJ / Android Studio
+*.iml
+**/*.iml
+*.ipr
+*.iws
+.idea/
+**/.idea/
+
+# VS Code
+.vscode/
+**/.vscode/
+
+# ------------------------------------------------------------------------------
+# Flutter / Dart / Pub
+# ------------------------------------------------------------------------------
+.dart_tool/
+**/.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+**/.flutter-plugins*
+.packages
+.pub-cache/
+**/.pub-cache/
+.pub/
+**/.pub/
+build/
+**/build/
+**/doc/api/
+coverage/
+**/coverage/
+
+# For Flutter packages/libraries, the root pubspec.lock is typically not tracked.
+# The example app pubspec.lock can be tracked or ignored.
+/pubspec.lock
+
+# Symbolication & Obfuscation
+app.*.symbols
+app.*.map.json
+
+# ------------------------------------------------------------------------------
+# FVM (Flutter Version Management)
+# ------------------------------------------------------------------------------
+# Ignore SDK binaries and cache, but track .fvm/fvm_config.json
+.fvm/flutter_sdk
+.fvm/versions/
+.fvm/release
+.fvm/version
+
+# ------------------------------------------------------------------------------
+# Android
+# ------------------------------------------------------------------------------
+**/.gradle/
+**/local.properties
+**/captures/
+**/.cxx/
+**/*.keystore
+**/*.jks
+key.properties
+**/GeneratedPluginRegistrant.java
+**/GeneratedPluginRegistrant.kt
+
+# ------------------------------------------------------------------------------
+# iOS & macOS
+# ------------------------------------------------------------------------------
+**/Pods/
+**/.symlinks/
+**/Flutter/ephemeral/
+**/Flutter/Generated.xcconfig
+**/Flutter/flutter_export_environment.sh
+**/Flutter/App.framework
+**/Flutter/Flutter.framework
+**/Flutter/Flutter.podspec
+**/Flutter/app.flx
+**/Flutter/app.zip
+**/Flutter/flutter_assets/
+**/DerivedData/
+**/*.mode1v3
+**/*.mode2v3
+**/*.moved-aside
+**/*.pbxuser
+**/*.perspectivev3
+**/*.xcuserstate
+**/project.xcworkspace/xcuserdata/
+**/xcuserdata/
+**/Runner/GeneratedPluginRegistrant.*
+**/.last_build_id
+
+# ------------------------------------------------------------------------------
+# Windows & Linux
+# ------------------------------------------------------------------------------
+**/ephemeral/
+**/CMakeCache.txt
+**/CMakeFiles/
+*.exe
+*.dll
+
+# ------------------------------------------------------------------------------
+# Test fixtures & temporary downloads
+# ------------------------------------------------------------------------------
+test/fixtures/*.epub
+!test/fixtures/pg28885.epub
+# FVM generated SDK files
+.fvm/

@@ -1,0 +1,21 @@
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    - always_use_package_imports
+    - avoid_dynamic_calls
+    - avoid_print
+    - cancel_subscriptions
+    - close_sinks
+    - prefer_const_constructors
+    - prefer_const_declarations
+    - prefer_final_fields
+    - sort_pub_dependencies
+    - unawaited_futures
+    - unnecessary_lambdas
+
+analyzer:
+  errors:
+    dead_code: warning
+    missing_return: error
+    todo: ignore
