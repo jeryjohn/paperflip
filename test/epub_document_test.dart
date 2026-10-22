@@ -49,6 +49,98 @@ void main() {
       );
     });
 
+    test('network sources with equivalent headers are equal', () {
+      const s1 = EpubSource.network(
+        'https://example.com/book.epub',
+        headers: {
+          'Authorization': 'Bearer token123',
+          'Accept': 'application/epub+zip',
+        },
+      );
+      const s2 = EpubSource.network(
+        'https://example.com/book.epub',
+        headers: {
+          'Accept': 'application/epub+zip',
+          'Authorization': 'Bearer token123',
+        },
+      );
+      expect(s1, equals(s2));
+      expect(s1.cacheKey, equals(s2.cacheKey));
+      expect(s1.hashCode, equals(s2.hashCode));
+    });
+
+    test('network sources with different headers have distinct identity', () {
+      const s1 = EpubSource.network(
+        'https://example.com/book.epub',
+        headers: {'Authorization': 'Bearer token1'},
+      );
+      const s2 = EpubSource.network(
+        'https://example.com/book.epub',
+        headers: {'Authorization': 'Bearer token2'},
+      );
+      expect(s1, isNot(equals(s2)));
+      expect(s1.cacheKey, isNot(equals(s2.cacheKey)));
+    });
+
+    test(
+      'network sources never expose sensitive headers in cacheKey or toString',
+      () {
+        const secret = 'super-secret-auth-token-xyz';
+        const s = EpubSource.network(
+          'https://example.com/book.epub',
+          headers: {'Authorization': 'Bearer $secret'},
+        );
+        expect(s.cacheKey, isNot(contains(secret)));
+        expect(s.displayName, isNot(contains(secret)));
+        expect(s.toString(), isNot(contains(secret)));
+      },
+    );
+
+    test('network source caller-supplied id takes precedence', () {
+      const s1 = EpubSource.network(
+        'https://example.com/book.epub',
+        id: 'revision-1',
+      );
+      const s2 = EpubSource.network(
+        'https://example.com/book.epub',
+        id: 'revision-2',
+      );
+      expect(s1, isNot(equals(s2)));
+      expect(s1.cacheKey, contains('revision-1'));
+      expect(s2.cacheKey, contains('revision-2'));
+    });
+
+    test(
+      'in-memory data sources compare by value and detect content changes',
+      () {
+        final bytesA1 = Uint8List.fromList([1, 2, 3, 4, 5]);
+        final bytesA2 = Uint8List.fromList([1, 2, 3, 4, 5]);
+        final bytesB = Uint8List.fromList([1, 2, 9, 4, 5]);
+
+        final sA1 = EpubSource.data(bytesA1);
+        final sA2 = EpubSource.data(bytesA2);
+        final sB = EpubSource.data(bytesB);
+
+        // Equivalent bytes produce the same identity and are equal
+        expect(sA1, equals(sA2));
+        expect(sA1.cacheKey, equals(sA2.cacheKey));
+
+        // Changed bytes produce a different identity
+        expect(sA1, isNot(equals(sB)));
+        expect(sA1.cacheKey, isNot(equals(sB.cacheKey)));
+      },
+    );
+
+    test('in-memory data sources support explicit caller-supplied id', () {
+      final bytes = Uint8List.fromList([1, 2, 3]);
+      final s1 = EpubSource.data(bytes, id: 'doc-v1');
+      final s2 = EpubSource.data(bytes, id: 'doc-v2');
+
+      expect(s1, isNot(equals(s2)));
+      expect(s1.cacheKey, contains('doc-v1'));
+      expect(s2.cacheKey, contains('doc-v2'));
+    });
+
     test('a missing file reports a useful error', () async {
       await expectLater(
         const EpubSource.file('/definitely/not/here.epub').load(),
@@ -164,5 +256,57 @@ void main() {
         throwsA(isA<EpubLoadException>()),
       );
     });
+
+    test(
+      'image resolution rejects external network URLs and data URIs',
+      () async {
+        final bytes = _read('pg28885.epub');
+        if (bytes == null) {
+          markTestSkipped('fixture pg28885.epub not present');
+          return;
+        }
+        final doc = await EpubDocument.open(EpubSource.data(bytes));
+
+        // External HTTP/HTTPS
+        expect(doc.imageFor('https://example.com/image.jpg'), isNull);
+        expect(doc.imageFor('http://example.com/image.jpg'), isNull);
+        expect(doc.imageFor('//example.com/image.jpg'), isNull);
+
+        // Data URIs
+        expect(
+          doc.imageFor(
+            'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+          ),
+          isNull,
+        );
+
+        // Missing resource
+        expect(doc.imageFor('non_existent_image_12345.jpg'), isNull);
+
+        // Relative path with query / fragment strips and resolves
+        final known = doc.spine.firstWhere((s) => s.html.contains('<img'));
+        final match = RegExp(
+          r'''<img[^>]+src=["']([^"']+)["']''',
+        ).firstMatch(known.html);
+        if (match != null) {
+          final rawSrc = match.group(1)!;
+          final normal = doc.imageFor(rawSrc, fromHref: known.href);
+          expect(normal, isNotNull);
+
+          // With fragment attached
+          final withFragment = doc.imageFor(
+            '$rawSrc#xywh=0,0,10,10',
+            fromHref: known.href,
+          );
+          expect(withFragment, isNotNull);
+          expect(withFragment, equals(normal));
+
+          // With query param attached
+          final withQuery = doc.imageFor('$rawSrc?v=123', fromHref: known.href);
+          expect(withQuery, isNotNull);
+          expect(withQuery, equals(normal));
+        }
+      },
+    );
   });
 }

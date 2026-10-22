@@ -208,4 +208,110 @@ void main() {
       expect(() => EpubReaderSettings(margin: -1), throwsAssertionError);
     });
   });
+
+  group('EpubPagination edge cases and empty state', () {
+    test('handles zero-length pagination safely without index errors', () {
+      final p = EpubPagination(
+        pageHeight: 600,
+        heights: const {},
+        spineLength: 0,
+      );
+
+      expect(p.totalPages, 0);
+      expect(p.spineLength, 0);
+      expect(p.isComplete, isTrue);
+      expect(p.measuredCount, 0);
+      expect(p.pagesIn(0), 0);
+      expect(p.pagesIn(5), 0);
+      expect(p.pagesIn(-1), 0);
+      expect(p.startPageOf(0), 0);
+      expect(p.startPageOf(5), 0);
+
+      final ref = p.resolve(0);
+      expect(ref.spineIndex, 0);
+      expect(ref.pageInDocument, 0);
+      expect(ref.pagesInDocument, 0);
+
+      final refOut = p.resolve(10);
+      expect(refOut.spineIndex, 0);
+      expect(refOut.pageInDocument, 0);
+
+      final loc = p.locatorAt(0);
+      expect(loc.spineIndex, 0);
+      expect(loc.progress, 0.0);
+
+      expect(p.pageFor(const EpubLocator(spineIndex: 0, progress: 0.5)), 0);
+      expect(p.pageFor(const EpubLocator(spineIndex: 3, progress: 0.9)), 0);
+    });
+
+    test('single-document book pagination and mapping', () {
+      final p = EpubPagination(
+        pageHeight: 500,
+        heights: const {0: 1500},
+        spineLength: 1,
+      );
+
+      expect(p.totalPages, 3);
+      expect(p.isComplete, isTrue);
+      expect(p.pagesIn(0), 3);
+      expect(p.startPageOf(0), 0);
+
+      expect(p.resolve(0).pageInDocument, 0);
+      expect(p.resolve(1).pageInDocument, 1);
+      expect(p.resolve(2).pageInDocument, 2);
+
+      expect(p.pageFor(const EpubLocator(spineIndex: 0, progress: 0.0)), 0);
+      expect(p.pageFor(const EpubLocator(spineIndex: 0, progress: 0.5)), 1);
+      expect(p.pageFor(const EpubLocator(spineIndex: 0, progress: 0.9)), 2);
+    });
+
+    test('unmeasured documents default to 1 page and report incomplete', () {
+      final p = EpubPagination(
+        pageHeight: 500,
+        heights: const {0: 1000},
+        spineLength: 3,
+      );
+
+      expect(p.isComplete, isFalse);
+      expect(p.measuredCount, 1);
+      expect(p.pagesIn(0), 2);
+      expect(p.pagesIn(1), 1); // Unmeasured document 1
+      expect(p.pagesIn(2), 1); // Unmeasured document 2
+      expect(p.totalPages, 4);
+    });
+
+    test('out-of-range page requests clamp safely', () {
+      final p = _paginate();
+      final low = p.resolve(-10);
+      expect(low.spineIndex, 0);
+      expect(low.pageInDocument, 0);
+
+      final high = p.resolve(100);
+      expect(high.spineIndex, 2);
+      expect(high.pageInDocument, 0);
+    });
+
+    test('out-of-range locators clamp safely to valid bounds', () {
+      final p = _paginate();
+      // Locator with negative spine index clamps to 0
+      final pageLow = p.pageFor(
+        const EpubLocator(spineIndex: -5, progress: 0.0),
+      );
+      expect(pageLow, 0);
+
+      // Locator with spine index beyond spine length clamps to last document
+      final pageHigh = p.pageFor(
+        const EpubLocator(spineIndex: 10, progress: 1.0),
+      );
+      expect(pageHigh, p.totalPages - 1);
+    });
+
+    test('rejects negative spineLength in constructor assertion', () {
+      expect(
+        () =>
+            EpubPagination(pageHeight: 500, heights: const {}, spineLength: -1),
+        throwsAssertionError,
+      );
+    });
+  });
 }

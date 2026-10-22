@@ -254,5 +254,44 @@ void main() {
       expect(find.textContaining('Could not open'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('source change in didUpdateWidget triggers reload', (
+      tester,
+    ) async {
+      final flip = PaperFlipController();
+      addTearDown(flip.dispose);
+
+      final sourceNotifier = ValueNotifier<EpubSource>(
+        EpubSource.data(Uint8List.fromList(List.filled(32, 1)), name: 'first'),
+      );
+      addTearDown(sourceNotifier.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ValueListenableBuilder<EpubSource>(
+              valueListenable: sourceNotifier,
+              builder: (context, source, _) {
+                return PaperFlip.epub(source: source, controller: flip);
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.textContaining('first'), findsOneWidget);
+
+      // Change source to second
+      sourceNotifier.value = EpubSource.data(
+        Uint8List.fromList(List.filled(32, 2)),
+        name: 'second',
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.textContaining('second'), findsOneWidget);
+    });
   });
 }

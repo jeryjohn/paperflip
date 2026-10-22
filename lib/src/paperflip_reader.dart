@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:developer';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pdfrx/pdfrx.dart';
@@ -250,7 +251,7 @@ class _PaperFlipReaderState extends State<PaperFlipReader>
 
     bool isLowMemory = false;
     try {
-      if (Platform.isAndroid) {
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
         final memInfo = await File('/proc/meminfo').readAsString();
         final match = RegExp(r'MemTotal:\s+(\d+)\s+kB').firstMatch(memInfo);
         if (match != null) {

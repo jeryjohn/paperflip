@@ -127,7 +127,9 @@ class EpubNetworkScreen extends StatelessWidget {
 }
 ```
 
-Other supported sources are `EpubSource.file(path)` and `EpubSource.data(bytes)`.
+Other supported sources are `EpubSource.file(path)` (not supported on web) and `EpubSource.data(bytes, name: ...)`.
+
+> **EPUB styling scope**: To composite pages seamlessly into the 3D page-curl mesh without platform view lag, Paperflip renders EPUB XHTML documents using pure Flutter widgets (`flutter_widget_from_html_core`). Configurable font sizes, line heights, fonts, themes, margins, headings, and inline HTML styles are supported. External CSS stylesheets are intentionally not evaluated.
 
 ## PDF
 Paperflip uses `pdfrx` to open PDF documents and renders PDF pages through the shared mesh-based page-flip engine.
@@ -246,7 +248,12 @@ Paperflip builds on the Flutter widget/rendering system and uses supporting pack
 The exact dependency versions are declared in `pubspec.yaml`.
 
 ## Platform support
-Platform support depends on the Flutter SDK, the target platform, and the underlying PDF/native integrations. Verify the platforms and minimum OS versions declared by the release's `pubspec.yaml` and test the package on each target before shipping.
+Paperflip supports Android, iOS, macOS, Windows, Linux, and Web:
+- **Android**: Full support, including optional hardware volume button page turns.
+- **iOS, macOS, Windows, Linux**: Full support for custom widgets, EPUB, and PDF rendering.
+- **Web**: Supported for custom widgets, PDF rendering, and network, asset, and in-memory EPUB sources (`EpubSource.file` is unsupported on web).
+
+Always test your application on your target devices and operating system versions before shipping.
 
 ## Testing and analysis
 Run these commands from the package root:

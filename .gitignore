@@ -121,3 +121,12 @@ test/fixtures/*.epub
 !test/fixtures/pg28885.epub
 # FVM generated SDK files
 .fvm/
+
+# Root-level leftover application scaffolding (example app has its own platform folders under example/)
+/android/app/
+/android/gradle/
+/ios/Runner/
+/linux/runner/
+/macos/Runner/
+/windows/runner/
+/web/icons/
