@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
@@ -155,6 +156,10 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
   final Map<int, SheetAtlas> _atlases = {};
   final Set<int> _packing = {};
   final Set<int> _capturing = {};
+  final Map<int, int> _captureRetries = {};
+  final Set<int> _permanentCaptureFailures = {};
+  static const int _maxCaptureRetries = 5;
+  bool _retryScheduled = false;
 
   /// Ensures build() can request capture work without stacking multiple
   /// post-frame callbacks for the same page window.
@@ -235,6 +240,16 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
 
   @visibleForTesting
   bool debugHasAtlas(int pageIndex) => _atlases.containsKey(pageIndex);
+
+  @visibleForTesting
+  bool debugHasTexture(int pageIndex) => _cache.contains(_keyFor(pageIndex));
+
+  @visibleForTesting
+  int debugRetryCount(int pageIndex) => _captureRetries[pageIndex] ?? 0;
+
+  @visibleForTesting
+  bool debugIsPermanentFailure(int pageIndex) =>
+      _permanentCaptureFailures.contains(pageIndex);
 
   @visibleForTesting
   int get debugLivePageIndex {
@@ -362,6 +377,8 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
   void _invalidateTextures() {
     _captureGeneration++;
     _capturing.clear();
+    _captureRetries.clear();
+    _permanentCaptureFailures.clear();
     _cache.clear();
     for (final atlas in _atlases.values) {
       atlas.dispose();
@@ -518,6 +535,18 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
       if (!mounted) return;
       unawaited(_captureOneTexture());
     });
+    WidgetsBinding.instance.scheduleFrame();
+  }
+
+  void _scheduleCaptureRetry() {
+    if (_retryScheduled || !mounted) return;
+    _retryScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _retryScheduled = false;
+      if (!mounted) return;
+      _prepareTextures();
+    });
+    WidgetsBinding.instance.scheduleFrame();
   }
 
   bool _isCapturing = false;
@@ -542,7 +571,11 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
 
       for (final index in window) {
         final key = _keyFor(index);
-        if (_cache.contains(key) || _capturing.contains(index)) continue;
+        if (_cache.contains(key) ||
+            _capturing.contains(index) ||
+            _permanentCaptureFailures.contains(index)) {
+          continue;
+        }
 
         _capturing.add(index);
         PageTexture? texture;
@@ -556,16 +589,38 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
           _capturing.remove(index);
         }
 
-        if (!mounted || texture == null) return;
+        if (!mounted) {
+          texture?.dispose();
+          return;
+        }
 
         // A resize/source update can invalidate a capture while it is in
         // flight. Never let a stale texture enter the cache.
-        if (generation != _captureGeneration) {
-          texture.dispose();
+        if (generation != _captureGeneration || key != _keyFor(index)) {
+          texture?.dispose();
           _prepareTextures();
           return;
         }
 
+        if (texture == null) {
+          final retries = (_captureRetries[index] ?? 0) + 1;
+          _captureRetries[index] = retries;
+          if (retries >= _maxCaptureRetries) {
+            _permanentCaptureFailures.add(index);
+            if (kDebugMode) {
+              debugPrint(
+                'MeshPaperFlip: page $index reached max capture retries '
+                '($retries). Discontinuing retries.',
+              );
+            }
+            unawaited(_drainIntents());
+          } else {
+            _scheduleCaptureRetry();
+          }
+          return;
+        }
+
+        _captureRetries.remove(index);
         _cache.put(key, texture);
         _prepareAdjacentSheets();
 
@@ -613,7 +668,7 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
     if (_atlases.containsKey(index) || _packing.contains(index)) return;
 
     final front = _cache[_keyFor(index)];
-    if (front == null) return; // not captured yet; retried next frame
+    if (front == null) return; // not captured yet; retried when texture arrives
 
     _packing.add(index);
     final generation = _captureGeneration;
@@ -621,12 +676,17 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
       final paper = await _paperTexture();
       if (!mounted || generation != _captureGeneration) return;
 
-      final atlas = await SheetAtlas.pack(
-        PageFaceSet(
-          front: front.share(),
-          back: PageTexture(image: paper.clone(), logicalSize: _pageSize),
-        ),
+      final faces = PageFaceSet(
+        front: front.share(),
+        back: PageTexture(image: paper.clone(), logicalSize: _pageSize),
       );
+      SheetAtlas atlas;
+      try {
+        atlas = await SheetAtlas.pack(faces);
+      } finally {
+        faces.dispose();
+      }
+
       // A resize or rebuild while packing makes this sheet wrong for the
       // current layout, so drop it rather than let it reach the screen.
       if (!mounted || generation != _captureGeneration) {
@@ -646,6 +706,12 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
       // was being packed. Keep the next forward/backward starting sheets warm.
       _prepareAdjacentSheets();
       unawaited(_drainIntents());
+    } catch (error, stackTrace) {
+      if (kDebugMode) {
+        debugPrint(
+          'MeshPaperFlip: unexpected failure packing sheet atlas for page $index: $error\n$stackTrace',
+        );
+      }
     } finally {
       _packing.remove(index);
     }
@@ -1019,10 +1085,31 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
         );
 
         if (!_atlases.containsKey(roles.turningFront)) {
+          if (_permanentCaptureFailures.contains(roles.turningFront)) {
+            // Cannot produce a 3D curl atlas for this page due to permanent capture
+            // failure. Fall back to direct navigation so the reader does not hang.
+            controller.clearIntent();
+            setState(() => _currentPage = target);
+            controller.reportPage(_currentPage);
+            _evictDistantSheets();
+            _prepareAdjacentSheets();
+            _prepareTextures();
+            continue;
+          }
+
           _prepareTextures();
           await _prepareSheet(roles.turningFront);
           if (!mounted) return;
           if (!_atlases.containsKey(roles.turningFront)) {
+            if (_permanentCaptureFailures.contains(roles.turningFront)) {
+              controller.clearIntent();
+              setState(() => _currentPage = target);
+              controller.reportPage(_currentPage);
+              _evictDistantSheets();
+              _prepareAdjacentSheets();
+              _prepareTextures();
+              continue;
+            }
             return;
           }
         }
@@ -1102,6 +1189,8 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
             if (pageIndex != null) {
               _cache.remove(_keyFor(pageIndex));
               _atlases.remove(pageIndex)?.dispose();
+              _captureRetries.remove(pageIndex);
+              _permanentCaptureFailures.remove(pageIndex);
             }
             _prepareTextures();
             if (mounted) {

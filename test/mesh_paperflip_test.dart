@@ -975,6 +975,182 @@ void main() {
         await tester.pumpAndSettle();
         expect(controller.currentPage, 1);
       });
+
+      testWidgets(
+        'repeated flipNext and flipPrev operations beyond page 3 navigate smoothly without stalling',
+        (tester) async {
+          final controller = PaperFlipController();
+          addTearDown(controller.dispose);
+
+          await tester.pumpWidget(_book(controller: controller, pageCount: 8));
+          await tester.pumpAndSettle();
+          expect(controller.currentPage, 0);
+
+          // Repeatedly flip forwards beyond 3 pages
+          for (var p = 1; p <= 7; p++) {
+            controller.flipNext();
+            await tester.pumpAndSettle();
+            expect(
+              controller.currentPage,
+              p,
+              reason: 'Failed navigating to page $p',
+            );
+          }
+
+          // Repeatedly flip backwards
+          for (var p = 6; p >= 0; p--) {
+            controller.flipPrev();
+            await tester.pumpAndSettle();
+            expect(
+              controller.currentPage,
+              p,
+              reason: 'Failed returning to page $p',
+            );
+          }
+
+          expect(tester.takeException(), isNull);
+        },
+      );
+
+      testWidgets(
+        'permanent capture failure caps retries at 5 and falls back to direct navigation without infinite loops',
+        (tester) async {
+          final controller = PaperFlipController();
+          addTearDown(controller.dispose);
+
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(
+                body: Center(
+                  child: SizedBox(
+                    width: 300,
+                    height: 400,
+                    child: MeshPaperFlip(
+                      pageCount: 4,
+                      controller: controller,
+                      pageBuilder: (context, index, constraints) {
+                        if (index == 1) {
+                          // Page 1 is permanently unready for capture
+                          return const PageCaptureGuard(
+                            isReady: false,
+                            child: ColoredBox(color: Colors.red),
+                          );
+                        }
+                        return ColoredBox(
+                          color: Colors.green,
+                          child: Center(child: Text('Page ${index + 1}')),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pump();
+
+          // Wait through exponential backoff delays (50ms, 100ms, 200ms, 400ms, 800ms)
+          for (var i = 0; i < 15; i++) {
+            await tester.pump(const Duration(milliseconds: 200));
+          }
+
+          final dynamic state = tester.state(find.byType(MeshPaperFlip));
+          // ignore: avoid_dynamic_calls
+          expect(state.debugRetryCount(1), 5);
+          // ignore: avoid_dynamic_calls
+          expect(state.debugIsPermanentFailure(1), isTrue);
+
+          // Calling flipNext must not hang or throw, but fallback to direct navigation
+          controller.flipNext();
+          await tester.pumpAndSettle();
+          expect(controller.currentPage, 1);
+          expect(tester.takeException(), isNull);
+        },
+      );
+
+      testWidgets(
+        'contentVersion change resets stale atlases and triggers clean recapture',
+        (tester) async {
+          final versionNotifier = ValueNotifier<int>(1);
+          addTearDown(versionNotifier.dispose);
+
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(
+                body: Center(
+                  child: SizedBox(
+                    width: 300,
+                    height: 400,
+                    child: ValueListenableBuilder<int>(
+                      valueListenable: versionNotifier,
+                      builder: (context, version, _) {
+                        return MeshPaperFlip(
+                          pageCount: 3,
+                          contentVersion: version,
+                          pageBuilder: (context, index, constraints) =>
+                              ColoredBox(
+                                color: Colors.white,
+                                child: Text('V$version P$index'),
+                              ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final dynamic state = tester.state(find.byType(MeshPaperFlip));
+          // ignore: avoid_dynamic_calls
+          expect(state.debugHasAtlas(0), isTrue);
+
+          // Update content version
+          versionNotifier.value = 2;
+          await tester.pump();
+          // After re-settling, new version is captured
+          await tester.pumpAndSettle();
+          // ignore: avoid_dynamic_calls
+          expect(state.debugHasAtlas(0), isTrue);
+          expect(tester.takeException(), isNull);
+        },
+      );
+
+      testWidgets(
+        'disposing MeshPaperFlip while capture is in flight does not leak resources or crash',
+        (tester) async {
+          final showNotifier = ValueNotifier<bool>(true);
+          addTearDown(showNotifier.dispose);
+
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(
+                body: ValueListenableBuilder<bool>(
+                  valueListenable: showNotifier,
+                  builder: (context, show, _) {
+                    if (!show) return const SizedBox.shrink();
+                    return MeshPaperFlip(
+                      pageCount: 4,
+                      pageBuilder: (context, index, constraints) =>
+                          const ColoredBox(color: Colors.blue),
+                    );
+                  },
+                ),
+              ),
+            ),
+          );
+          // Initial pump mounts MeshPaperFlip and starts capture pipeline
+          await tester.pump();
+
+          // Immediately dispose widget by hiding it
+          showNotifier.value = false;
+          await tester.pump();
+          await tester.pumpAndSettle();
+
+          expect(tester.takeException(), isNull);
+        },
+      );
     });
   });
 }

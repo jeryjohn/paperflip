@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'dart:developer';
-import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pdfrx/pdfrx.dart';
@@ -10,6 +8,7 @@ import 'package:pdfrx/pdfrx.dart';
 import 'package:paperflip/src/paperflip_controller.dart';
 import 'package:paperflip/src/paperflip_pdf.dart';
 import 'package:paperflip/src/flip_settings.dart';
+import 'package:paperflip/src/memory/device_memory.dart';
 import 'package:paperflip/src/page_selector_dialog.dart';
 import 'package:paperflip/src/volume/volume_key_manager.dart';
 
@@ -251,20 +250,18 @@ class _PaperFlipReaderState extends State<PaperFlipReader>
 
     bool isLowMemory = false;
     try {
-      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-        final memInfo = await File('/proc/meminfo').readAsString();
-        final match = RegExp(r'MemTotal:\s+(\d+)\s+kB').firstMatch(memInfo);
-        if (match != null) {
-          final totalMemKB = int.parse(match.group(1)!);
-          final totalMemMB = totalMemKB ~/ 1024;
-          log('Device total RAM: ${totalMemMB}MB');
-          isLowMemory = totalMemMB < _lowMemoryThresholdMB;
-        }
+      final totalMemMB = await getDeviceTotalMemoryMB();
+      if (totalMemMB != null) {
+        log('Device total RAM: ${totalMemMB}MB');
+        isLowMemory = totalMemMB < _lowMemoryThresholdMB;
+      } else {
+        // Safe fallback on platforms without memory probe (web, iOS, desktop):
+        // do not assume low memory.
+        isLowMemory = false;
       }
     } catch (e) {
       log('Error checking device memory: $e');
-      // Default to lightweight viewer on error to be safe.
-      isLowMemory = true;
+      isLowMemory = false;
     }
     if (mounted) {
       setState(() => _isLowMemoryDevice = isLowMemory);

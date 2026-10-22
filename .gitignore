@@ -118,7 +118,6 @@ key.properties
 # Test fixtures & temporary downloads
 # ------------------------------------------------------------------------------
 test/fixtures/*.epub
-!test/fixtures/pg28885.epub
 # FVM generated SDK files
 .fvm/
 

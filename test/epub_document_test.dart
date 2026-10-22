@@ -141,6 +141,25 @@ void main() {
       expect(s2.cacheKey, contains('doc-v2'));
     });
 
+    test(
+      'detects content changes in middle regions that were previously unsampled',
+      () {
+        final bytesA = Uint8List(8192);
+        bytesA[0] = 1;
+        final bytesB = Uint8List(8192);
+        bytesB[0] = 1;
+        // Offset 2048 was between the first 1024 bytes and the middle sample in the old code
+        bytesB[2048] = 42;
+
+        final sourceA = EpubSource.data(bytesA);
+        final sourceB = EpubSource.data(bytesB);
+
+        expect(sourceA, isNot(equals(sourceB)));
+        expect(sourceA.cacheKey, isNot(equals(sourceB.cacheKey)));
+        expect(sourceA.hashCode, isNot(equals(sourceB.hashCode)));
+      },
+    );
+
     test('a missing file reports a useful error', () async {
       await expectLater(
         const EpubSource.file('/definitely/not/here.epub').load(),

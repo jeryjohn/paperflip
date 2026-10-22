@@ -41,9 +41,11 @@ sealed class EpubSource {
   /// Use bytes already in memory.
   ///
   /// An optional [id] may be provided. If omitted, identity is derived from
-  /// the name, byte length, and a bounded structural sample of bytes, ensuring
-  /// value-based equality and cache invalidation without repeatedly hashing large
-  /// files on every widget build.
+  /// the name, byte length, and a full 64-bit digest of the byte content,
+  /// guaranteeing value-based equality and cache invalidation if content mutates.
+  ///
+  /// For very large byte sources where caller-managed versioning is desired
+  /// to bypass digest calculation on construction, supply an explicit [id].
   factory EpubSource.data(Uint8List bytes, {String name, String? id}) =
       EpubDataSource;
 
@@ -171,7 +173,7 @@ final class EpubDataSource extends EpubSource {
   EpubDataSource(this.bytes, {this.name = 'memory', String? id})
     : _cacheKey = id != null
           ? 'data:$name:$id'
-          : 'data:$name:${_fingerprint(bytes)}';
+          : 'data:$name:${_computeDigest(bytes)}';
 
   final Uint8List bytes;
   final String name;
@@ -186,40 +188,19 @@ final class EpubDataSource extends EpubSource {
   @override
   Future<Uint8List> load() async => bytes;
 
-  static String _fingerprint(Uint8List bytes) {
+  static String _computeDigest(Uint8List bytes) {
     final len = bytes.length;
     var hash = BigInt.parse('0xcbf29ce484222325');
     final prime = BigInt.parse('0x100000001b3');
     final mask64 = BigInt.parse('0xffffffffffffffff');
 
-    void mix(int byte) {
-      hash = (hash ^ BigInt.from(byte)) & mask64;
-      hash = (hash * prime) & mask64;
-    }
-
-    void mixRange(int start, int count) {
-      final end = (start + count).clamp(0, len);
-      for (var i = start; i < end; i++) {
-        mix(bytes[i]);
-      }
-    }
-
     // Mix length
-    mix(len & 0xff);
-    mix((len >> 8) & 0xff);
-    mix((len >> 16) & 0xff);
-    mix((len >> 24) & 0xff);
+    hash = (hash ^ BigInt.from(len)) & mask64;
+    hash = (hash * prime) & mask64;
 
-    if (len <= 4096) {
-      mixRange(0, len);
-    } else {
-      // Sample bounded segments across the file (header, mid-points, tail).
-      // Total sampled bytes is ~3.5KB, so hashing takes < 0.005ms even for 100MB files.
-      mixRange(0, 1024);
-      mixRange((len * 0.25).floor(), 512);
-      mixRange((len * 0.50).floor(), 512);
-      mixRange((len * 0.75).floor(), 512);
-      mixRange(len - 1024, 1024);
+    for (var i = 0; i < len; i++) {
+      hash = (hash ^ BigInt.from(bytes[i])) & mask64;
+      hash = (hash * prime) & mask64;
     }
 
     return '${len}_${hash.toRadixString(16).padLeft(16, '0')}';

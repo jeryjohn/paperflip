@@ -109,6 +109,12 @@ class WidgetPageRasterizer {
       // return an invalid image handle after a failed readback.
       if (image.width <= 0 || image.height <= 0) {
         image.dispose();
+        if (kDebugMode) {
+          debugPrint(
+            'WidgetPageRasterizer: rasterization produced empty image '
+            '(${image.width}x${image.height}) for page ${textureKey?.pageId ?? key}.',
+          );
+        }
         return null;
       }
 
@@ -117,10 +123,13 @@ class WidgetPageRasterizer {
         logicalSize: logicalSize,
         key: textureKey,
       );
-    } on Object {
-      // Most commonly a platform view in the subtree. Surfacing null lets the
-      // caller retry/fall back to the live widget rather than showing a blank
-      // sheet.
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint(
+          'WidgetPageRasterizer: rasterization exception for page '
+          '${textureKey?.pageId ?? key}: $error',
+        );
+      }
       return null;
     }
   }
@@ -183,6 +192,7 @@ class PageCaptureHost extends StatelessWidget {
             children: [
               for (final index in uniqueIndices)
                 Positioned(
+                  key: ValueKey<int>(index),
                   left: 0,
                   top: 0,
                   width: pageSize.width,

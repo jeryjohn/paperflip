@@ -44,6 +44,7 @@ jobs:
           flutter pub get
           flutter analyze
           flutter test
+          flutter build web
 
       - name: Validate publishing archive
         run: flutter pub publish --dry-run

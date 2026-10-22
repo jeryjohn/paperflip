@@ -300,6 +300,36 @@ void main() {
         cache.dispose();
       },
     );
+
+    test(
+      'in-flight render deduplication shares a single render operation',
+      () async {
+        var renderCount = 0;
+        final completer = Completer<ui.Image?>();
+        final doc = _MockPdfDocument(pageCount: 5);
+        final cache = PdfPageImageCache(
+          document: doc,
+          renderOverride: (pageIndex, w, h) {
+            renderCount++;
+            return completer.future;
+          },
+        );
+
+        final f1 = cache.loadPage(0, fullWidth: 100, fullHeight: 100);
+        final f2 = cache.loadPage(0, fullWidth: 100, fullHeight: 100);
+        expect(cache.hasInFlight(0), isTrue);
+        expect(renderCount, 1);
+
+        final img = await createTestImage();
+        completer.complete(img);
+
+        final res1 = await f1;
+        final res2 = await f2;
+        expect(res1, equals(res2));
+        expect(cache.hasInFlight(0), isFalse);
+        cache.dispose();
+      },
+    );
   });
 }
 
