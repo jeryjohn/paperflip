@@ -288,7 +288,7 @@ class _CommonScreenState extends State<CommonScreen> {
           children: [
             Positioned.fill(
               child: PaperFlip.epub(
-                source: const EpubSource.network(
+                source: EpubSource.network(
                   'https://www.gutenberg.org/cache/epub/28885/pg28885-images.epub',
                 ),
                 controller: _flipController,

@@ -13,9 +13,7 @@ void main() {
     );
 
     // Facade
-    const PaperFlip.epub(
-      source: EpubSource.network('https://example.com/book.epub'),
-    );
+    PaperFlip.epub(source: EpubSource.network('https://example.com/book.epub'));
     PaperFlip.pdf(source: PdfDocumentRefAsset('assets/doc.pdf'));
     PaperFlip.custom(
       pageCount: 20,
@@ -23,7 +21,7 @@ void main() {
     );
 
     // Sources
-    const EpubSource.network('u', headers: {'a': 'b'});
+    EpubSource.network('u', headers: const {'a': 'b'});
     const EpubSource.file('/tmp/a.epub');
     const EpubSource.asset('assets/a.epub');
 
@@ -77,7 +75,7 @@ void main() {
       onDocumentLoaded: (pageCount) {},
     );
     const PaperFlipReader(title: 'My Document', pdfAssetPath: 'assets/d.pdf');
-    const PaperFlipEpub(source: EpubSource.network('https://e.com/b.epub'));
+    PaperFlipEpub(source: EpubSource.network('https://e.com/b.epub'));
 
     controller.dispose();
     epub.dispose();

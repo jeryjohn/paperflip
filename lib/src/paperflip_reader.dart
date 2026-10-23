@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:developer';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import 'package:paperflip/src/paperflip_controller.dart';
@@ -153,13 +152,6 @@ class _PaperFlipReaderState extends State<PaperFlipReader>
     if (widget.useVolumeKeys) {
       VolumeKeyManager.instance.registerClient(this);
     }
-
-    SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.portraitDown,
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
     _checkDeviceMemory();
   }
 
@@ -178,11 +170,6 @@ class _PaperFlipReaderState extends State<PaperFlipReader>
   @override
   void dispose() {
     VolumeKeyManager.instance.unregisterClient(this);
-    // Hand orientation back to the host app rather than forcing portrait:
-    // an empty list re-applies whatever the platform manifest allows. Flutter
-    // exposes no way to read the previous preference, so this is the closest
-    // we can get to "restore".
-    SystemChrome.setPreferredOrientations(const []);
     _hideControlsTimer?.cancel();
     _flipController.removeListener(_onFlipPageChanged);
     if (_ownsFlipController) _flipController.dispose();

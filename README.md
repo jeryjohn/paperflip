@@ -118,7 +118,7 @@ class EpubNetworkScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       body: PaperFlip.epub(
-        source: const EpubSource.network(
+        source: EpubSource.network(
           'https://www.gutenberg.org/cache/epub/28885/pg28885-images.epub',
         ),
       ),

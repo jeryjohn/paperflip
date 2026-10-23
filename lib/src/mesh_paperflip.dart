@@ -135,6 +135,7 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
   final CurlSmoother _smoother = CurlSmoother();
   final PageTextureCache _cache = PageTextureCache();
   final Map<int, GlobalKey> _captureKeys = {};
+  final Object _sourceId = Object();
 
   late WidgetPageRasterizer _rasterizer;
   late AnimationController _settle;
@@ -154,7 +155,7 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
   /// sheet assembled on drag *start* would not exist for the first few frames
   /// and the page would sit flat and then pop into a curl.
   final Map<int, SheetAtlas> _atlases = {};
-  final Set<int> _packing = {};
+  final Map<int, Object> _packing = {};
   final Set<int> _capturing = {};
   final Map<int, int> _captureRetries = {};
   final Set<int> _permanentCaptureFailures = {};
@@ -218,6 +219,9 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
 
   Duration _lastTick = Duration.zero;
   int _captureGeneration = 0;
+  final Map<int, int> _pageGenerations = {};
+
+  int _pageGeneration(int page) => _pageGenerations[page] ?? 0;
 
   double get _effectiveCapturePixelRatio =>
       widget.capturePixelRatio.isFinite && widget.capturePixelRatio > 0
@@ -245,11 +249,31 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
   bool debugHasTexture(int pageIndex) => _cache.contains(_keyFor(pageIndex));
 
   @visibleForTesting
+  bool debugIsPacking(int pageIndex) => _packing.containsKey(pageIndex);
+
+  @visibleForTesting
   int debugRetryCount(int pageIndex) => _captureRetries[pageIndex] ?? 0;
+
+  @visibleForTesting
+  Future<PageTexture?> Function(
+    GlobalKey key, {
+    required Size logicalSize,
+    PageTextureKey? textureKey,
+  })?
+  debugCaptureOverride;
+
+  @visibleForTesting
+  Future<SheetAtlas> Function(PageFaceSet faces)? debugPackAtlasOverride;
 
   @visibleForTesting
   bool debugIsPermanentFailure(int pageIndex) =>
       _permanentCaptureFailures.contains(pageIndex);
+
+  @visibleForTesting
+  Future<void> debugCaptureOneTexture() => _captureOneTexture();
+
+  @visibleForTesting
+  Future<void> debugPrepareSheet(int pageIndex) => _prepareSheet(pageIndex);
 
   @visibleForTesting
   int get debugLivePageIndex {
@@ -322,6 +346,8 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
 
   @override
   void dispose() {
+    _captureGeneration++;
+    _pageGenerations.clear();
     VolumeKeyManager.instance.unregisterClient(this);
     final effective = widget.controller ?? _internalController;
     effective?.removeListener(_onControllerUpdate);
@@ -334,8 +360,13 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
       atlas.dispose();
     }
     _atlases.clear();
+    _packing.clear();
     _capturing.clear();
     _cache.clear();
+    _retryScheduled = false;
+    _capturePassScheduled = false;
+    _captureRetries.clear();
+    _permanentCaptureFailures.clear();
     _paperImage?.dispose();
     super.dispose();
   }
@@ -364,11 +395,15 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
   }
 
   PageTextureKey _keyFor(int index) => PageTextureKey(
-    sourceId: identityHashCode(widget.pageBuilder),
+    sourceId: _sourceId,
     pageId: index,
     logicalSize: _pageSize,
     pixelRatio: _effectiveCapturePixelRatio,
-    contentVersion: Object.hash(widget.contentVersion, _captureGeneration),
+    contentVersion: Object.hash(
+      widget.contentVersion,
+      _captureGeneration,
+      _pageGeneration(index),
+    ),
   );
 
   GlobalKey _captureKeyFor(int index) =>
@@ -376,10 +411,14 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
 
   void _invalidateTextures() {
     _captureGeneration++;
+    _pageGenerations.clear();
     _capturing.clear();
     _captureRetries.clear();
     _permanentCaptureFailures.clear();
+    _retryScheduled = false;
+    _capturePassScheduled = false;
     _cache.clear();
+    _scene.rest();
     for (final atlas in _atlases.values) {
       atlas.dispose();
     }
@@ -571,6 +610,7 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
 
       for (final index in window) {
         final key = _keyFor(index);
+        final pageGen = _pageGeneration(index);
         if (_cache.contains(key) ||
             _capturing.contains(index) ||
             _permanentCaptureFailures.contains(index)) {
@@ -580,11 +620,19 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
         _capturing.add(index);
         PageTexture? texture;
         try {
-          texture = await _rasterizer.capture(
-            _captureKeyFor(index),
-            logicalSize: _pageSize,
-            textureKey: key,
-          );
+          if (debugCaptureOverride != null) {
+            texture = await debugCaptureOverride!(
+              _captureKeyFor(index),
+              logicalSize: _pageSize,
+              textureKey: key,
+            );
+          } else {
+            texture = await _rasterizer.capture(
+              _captureKeyFor(index),
+              logicalSize: _pageSize,
+              textureKey: key,
+            );
+          }
         } finally {
           _capturing.remove(index);
         }
@@ -594,9 +642,11 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
           return;
         }
 
-        // A resize/source update can invalidate a capture while it is in
-        // flight. Never let a stale texture enter the cache.
-        if (generation != _captureGeneration || key != _keyFor(index)) {
+        // A resize/source update or readiness notification can invalidate a capture
+        // while it is in flight. Never let a stale texture enter the cache.
+        if (generation != _captureGeneration ||
+            pageGen != _pageGeneration(index) ||
+            key != _keyFor(index)) {
           texture?.dispose();
           _prepareTextures();
           return;
@@ -665,16 +715,28 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
   /// sheet is skipped.
   Future<void> _prepareSheet(int index) async {
     if (index < 0 || index >= widget.pageCount) return;
-    if (_atlases.containsKey(index) || _packing.contains(index)) return;
+    if (_atlases.containsKey(index) || _packing.containsKey(index)) return;
 
-    final front = _cache[_keyFor(index)];
+    final key = _keyFor(index);
+    final front = _cache[key];
     if (front == null) return; // not captured yet; retried when texture arrives
 
-    _packing.add(index);
+    final token = Object();
+    _packing[index] = token;
     final generation = _captureGeneration;
+    final pageGen = _pageGeneration(index);
+
+    bool isStale() =>
+        !mounted ||
+        generation != _captureGeneration ||
+        pageGen != _pageGeneration(index) ||
+        key != _keyFor(index);
+
     try {
       final paper = await _paperTexture();
-      if (!mounted || generation != _captureGeneration) return;
+      if (isStale()) {
+        return;
+      }
 
       final faces = PageFaceSet(
         front: front.share(),
@@ -682,18 +744,34 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
       );
       SheetAtlas atlas;
       try {
-        atlas = await SheetAtlas.pack(faces);
+        if (debugPackAtlasOverride != null) {
+          atlas = await debugPackAtlasOverride!(faces);
+        } else {
+          atlas = await SheetAtlas.pack(faces);
+        }
       } finally {
         faces.dispose();
       }
 
-      // A resize or rebuild while packing makes this sheet wrong for the
-      // current layout, so drop it rather than let it reach the screen.
-      if (!mounted || generation != _captureGeneration) {
+      // A resize, rebuild, or readiness notification while packing makes this
+      // sheet wrong for the current layout or content, so drop it rather than
+      // let it reach the screen.
+      if (isStale()) {
         atlas.dispose();
         return;
       }
+      final oldAtlas = _atlases[index];
       _atlases[index] = atlas;
+      if (oldAtlas != null) {
+        if (identical(_scene.atlas, oldAtlas)) {
+          if (_roles?.turningFront == index) {
+            _scene.commit(curl: _scene.curl, active: true, atlas: atlas);
+          } else {
+            _scene.rest();
+          }
+        }
+        oldAtlas.dispose();
+      }
       _evictDistantSheets();
       if (_roles?.turningFront == index) {
         _scene.commit(curl: _scene.curl, active: true, atlas: atlas);
@@ -707,13 +785,22 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
       _prepareAdjacentSheets();
       unawaited(_drainIntents());
     } catch (error, stackTrace) {
-      if (kDebugMode) {
+      if (!isStale() && kDebugMode) {
         debugPrint(
           'MeshPaperFlip: unexpected failure packing sheet atlas for page $index: $error\n$stackTrace',
         );
       }
     } finally {
-      _packing.remove(index);
+      if (identical(_packing[index], token)) {
+        _packing.remove(index);
+      }
+      if (mounted &&
+          isStale() &&
+          !_atlases.containsKey(index) &&
+          !_packing.containsKey(index) &&
+          _cache.contains(_keyFor(index))) {
+        unawaited(_prepareSheet(index));
+      }
     }
   }
 
@@ -722,7 +809,13 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
     final keep = {_currentPage, _currentPage - 1, _currentPage + 1};
     final doomed = _atlases.keys.where((k) => !keep.contains(k)).toList();
     for (final key in doomed) {
-      _atlases.remove(key)?.dispose();
+      final atlas = _atlases.remove(key);
+      if (atlas != null) {
+        if (identical(_scene.atlas, atlas)) {
+          _scene.rest();
+        }
+        atlas.dispose();
+      }
     }
   }
 
@@ -1187,10 +1280,19 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
           onNotification: (notification) {
             final pageIndex = notification.pageIndex;
             if (pageIndex != null) {
-              _cache.remove(_keyFor(pageIndex));
-              _atlases.remove(pageIndex)?.dispose();
+              _pageGenerations[pageIndex] = _pageGeneration(pageIndex) + 1;
+              _cache.retainWhere((k) => k.pageId != pageIndex);
+              final oldAtlas = _atlases.remove(pageIndex);
+              if (oldAtlas != null) {
+                if (identical(_scene.atlas, oldAtlas)) {
+                  _scene.rest();
+                }
+                oldAtlas.dispose();
+              }
               _captureRetries.remove(pageIndex);
               _permanentCaptureFailures.remove(pageIndex);
+            } else {
+              _invalidateTextures();
             }
             _prepareTextures();
             if (mounted) {

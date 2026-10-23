@@ -313,5 +313,40 @@ void main() {
         throwsAssertionError,
       );
     });
+
+    test(
+      'instances with identical page counts but different measurement completeness are not equal',
+      () {
+        // Document 0 has measured height of 500 (occupies 1 page, measured = true)
+        final pComplete = EpubPagination(
+          pageHeight: 500,
+          heights: const {0: 500.0},
+          spineLength: 1,
+        );
+        // Document 0 has no height (defaults to 1 page, measured = false)
+        final pIncomplete = EpubPagination(
+          pageHeight: 500,
+          heights: const {},
+          spineLength: 1,
+        );
+
+        expect(pComplete.totalPages, equals(pIncomplete.totalPages));
+        expect(pComplete.pagesIn(0), equals(pIncomplete.pagesIn(0)));
+        expect(pComplete.isComplete, isTrue);
+        expect(pIncomplete.isComplete, isFalse);
+
+        expect(pComplete, isNot(equals(pIncomplete)));
+        expect(pComplete.hashCode, isNot(equals(pIncomplete.hashCode)));
+
+        // Identical measurement state produces equal objects and hash codes
+        final pComplete2 = EpubPagination(
+          pageHeight: 500,
+          heights: const {0: 500.0},
+          spineLength: 1,
+        );
+        expect(pComplete, equals(pComplete2));
+        expect(pComplete.hashCode, equals(pComplete2.hashCode));
+      },
+    );
   });
 }

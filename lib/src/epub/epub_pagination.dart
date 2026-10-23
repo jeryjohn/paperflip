@@ -191,7 +191,8 @@ class EpubPagination {
       other.pageHeight == pageHeight &&
       other._totalPages == _totalPages &&
       other._spineLength == _spineLength &&
-      listEquals(other._pagesPerDocument, _pagesPerDocument);
+      listEquals(other._pagesPerDocument, _pagesPerDocument) &&
+      listEquals(other._measured, _measured);
 
   @override
   int get hashCode => Object.hash(
@@ -199,6 +200,7 @@ class EpubPagination {
     _totalPages,
     _spineLength,
     Object.hashAll(_pagesPerDocument),
+    Object.hashAll(_measured),
   );
 
   @override

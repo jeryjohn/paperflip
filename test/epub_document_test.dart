@@ -28,38 +28,38 @@ void main() {
   group('EpubSource', () {
     test('sources compare by value', () {
       expect(
-        const EpubSource.network('https://example.com/a.epub'),
-        const EpubSource.network('https://example.com/a.epub'),
+        EpubSource.network('https://example.com/a.epub'),
+        EpubSource.network('https://example.com/a.epub'),
       );
       expect(
-        const EpubSource.network('https://example.com/a.epub'),
-        isNot(const EpubSource.network('https://example.com/b.epub')),
+        EpubSource.network('https://example.com/a.epub'),
+        isNot(EpubSource.network('https://example.com/b.epub')),
       );
       expect(
         const EpubSource.file('/tmp/a.epub'),
-        isNot(const EpubSource.network('/tmp/a.epub')),
+        isNot(EpubSource.network('/tmp/a.epub')),
         reason: 'different kinds with the same string are not equal',
       );
     });
 
     test('cache keys are namespaced per kind', () {
       expect(
-        const EpubSource.network('x').cacheKey,
+        EpubSource.network('x').cacheKey,
         isNot(const EpubSource.asset('x').cacheKey),
       );
     });
 
     test('network sources with equivalent headers are equal', () {
-      const s1 = EpubSource.network(
+      final s1 = EpubSource.network(
         'https://example.com/book.epub',
-        headers: {
+        headers: const {
           'Authorization': 'Bearer token123',
           'Accept': 'application/epub+zip',
         },
       );
-      const s2 = EpubSource.network(
+      final s2 = EpubSource.network(
         'https://example.com/book.epub',
-        headers: {
+        headers: const {
           'Accept': 'application/epub+zip',
           'Authorization': 'Bearer token123',
         },
@@ -70,13 +70,13 @@ void main() {
     });
 
     test('network sources with different headers have distinct identity', () {
-      const s1 = EpubSource.network(
+      final s1 = EpubSource.network(
         'https://example.com/book.epub',
-        headers: {'Authorization': 'Bearer token1'},
+        headers: const {'Authorization': 'Bearer token1'},
       );
-      const s2 = EpubSource.network(
+      final s2 = EpubSource.network(
         'https://example.com/book.epub',
-        headers: {'Authorization': 'Bearer token2'},
+        headers: const {'Authorization': 'Bearer token2'},
       );
       expect(s1, isNot(equals(s2)));
       expect(s1.cacheKey, isNot(equals(s2.cacheKey)));
@@ -86,9 +86,9 @@ void main() {
       'network sources never expose sensitive headers in cacheKey or toString',
       () {
         const secret = 'super-secret-auth-token-xyz';
-        const s = EpubSource.network(
+        final s = EpubSource.network(
           'https://example.com/book.epub',
-          headers: {'Authorization': 'Bearer $secret'},
+          headers: const {'Authorization': 'Bearer $secret'},
         );
         expect(s.cacheKey, isNot(contains(secret)));
         expect(s.displayName, isNot(contains(secret)));
@@ -97,11 +97,11 @@ void main() {
     );
 
     test('network source caller-supplied id takes precedence', () {
-      const s1 = EpubSource.network(
+      final s1 = EpubSource.network(
         'https://example.com/book.epub',
         id: 'revision-1',
       );
-      const s2 = EpubSource.network(
+      final s2 = EpubSource.network(
         'https://example.com/book.epub',
         id: 'revision-2',
       );
@@ -109,6 +109,27 @@ void main() {
       expect(s1.cacheKey, contains('revision-1'));
       expect(s2.cacheKey, contains('revision-2'));
     });
+
+    test(
+      'mutating caller headers map after construction does not alter identity',
+      () {
+        final mutableHeaders = <String, String>{
+          'Authorization': 'Bearer initial',
+        };
+        final source = EpubSource.network(
+          'https://example.com/book.epub',
+          headers: mutableHeaders,
+        );
+        final initialKey = source.cacheKey;
+        final initialHash = source.hashCode;
+
+        mutableHeaders['Authorization'] = 'Bearer mutated';
+        mutableHeaders['Extra'] = 'value';
+
+        expect(source.cacheKey, equals(initialKey));
+        expect(source.hashCode, equals(initialHash));
+      },
+    );
 
     test(
       'in-memory data sources compare by value and detect content changes',
@@ -157,6 +178,61 @@ void main() {
         expect(sourceA, isNot(equals(sourceB)));
         expect(sourceA.cacheKey, isNot(equals(sourceB.cacheKey)));
         expect(sourceA.hashCode, isNot(equals(sourceB.hashCode)));
+      },
+    );
+
+    test(
+      'mutating input byte array after construction does not alter stored source or identity',
+      () async {
+        final rawBytes = Uint8List.fromList([10, 20, 30, 40]);
+        final source = EpubSource.data(rawBytes);
+        final expectedKey = source.cacheKey;
+
+        rawBytes[0] = 99;
+        rawBytes[1] = 88;
+
+        expect(source.cacheKey, equals(expectedKey));
+        final loaded = await source.load();
+        expect(loaded[0], 10);
+        expect(loaded[1], 20);
+      },
+    );
+
+    test(
+      'mutating data returned from load or bytes getter does not alter stored source',
+      () async {
+        final source = EpubSource.data(Uint8List.fromList([1, 2, 3]));
+        final loaded = await source.load();
+        loaded[0] = 99;
+
+        final loadedAgain = await source.load();
+        expect(loadedAgain[0], 1);
+
+        if (source is EpubDataSource) {
+          final exposed = source.bytes;
+          exposed[0] = 77;
+          final loadedThird = await source.load();
+          expect(loadedThird[0], 1);
+        }
+      },
+    );
+
+    test(
+      'handles empty input and realistically large inputs efficiently',
+      () async {
+        final emptySource = EpubSource.data(Uint8List(0));
+        expect(emptySource.cacheKey, contains('0_'));
+
+        // 500 KB test payload
+        final largeBytes = Uint8List(500 * 1024);
+        largeBytes[250 * 1024] = 0xAA;
+        final stopwatch = Stopwatch()..start();
+        final largeSource = EpubSource.data(largeBytes);
+        stopwatch.stop();
+
+        expect(largeSource.cacheKey, contains('${500 * 1024}_'));
+        // Hashing 500 KB should complete in well under 200 ms without BigInt allocation overhead
+        expect(stopwatch.elapsedMilliseconds, lessThan(200));
       },
     );
 

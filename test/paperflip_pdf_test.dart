@@ -330,18 +330,378 @@ void main() {
         cache.dispose();
       },
     );
+
+    test(
+      'PdfImage returned by page.render() is properly disposed after createImage()',
+      () async {
+        final uiImage = await createTestImage();
+        final mockPdfImage = _MockPdfImage();
+
+        final mockPage = _MockPdfPage(
+          index: 0,
+          onRender: (w, h) async => mockPdfImage,
+        );
+        final doc = _MockPdfDocument(customPages: [mockPage]);
+        final cache = PdfPageImageCache(
+          document: doc,
+          createImageOverride: (_) async => uiImage,
+        );
+
+        expect(mockPdfImage.isDisposed, isFalse);
+        final result = await cache.loadPage(0, fullWidth: 100, fullHeight: 100);
+
+        expect(result, isNotNull);
+        // Verify that pdfImage.dispose() was reliably called in the finally block
+        expect(mockPdfImage.isDisposed, isTrue);
+        expect(cache.hasPageCached(0), isTrue);
+
+        cache.dispose();
+        expect(uiImage.debugDisposed, isTrue);
+      },
+    );
+
+    test(
+      'disposing cache while render is in flight disposes PdfImage',
+      () async {
+        final mockPdfImage = _MockPdfImage();
+        final completer = Completer<PdfImage?>();
+
+        final mockPage = _MockPdfPage(
+          index: 0,
+          onRender: (w, h) => completer.future,
+        );
+        final doc = _MockPdfDocument(customPages: [mockPage]);
+        final cache = PdfPageImageCache(document: doc);
+
+        final loadFuture = cache.loadPage(0, fullWidth: 100, fullHeight: 100);
+        expect(cache.hasInFlight(0), isTrue);
+
+        // Dispose cache while render is awaiting
+        cache.dispose();
+        expect(cache.isDisposed, isTrue);
+
+        // Now complete render
+        completer.complete(mockPdfImage);
+        final result = await loadFuture;
+
+        expect(result, isNull);
+        // mockPdfImage must be disposed and never leaked
+        expect(mockPdfImage.isDisposed, isTrue);
+      },
+    );
+
+    test(
+      'disposing cache during createImage disposes PdfImage and resulting ui.Image',
+      () async {
+        final uiImage = await createTestImage();
+        final mockPdfImage = _MockPdfImage();
+        final renderCompleter = Completer<PdfImage>();
+        final createImageStarted = Completer<void>();
+        final createImageCompleter = Completer<ui.Image>();
+
+        final mockPage = _MockPdfPage(
+          index: 0,
+          onRender: (w, h) => renderCompleter.future,
+        );
+        final doc = _MockPdfDocument(customPages: [mockPage]);
+        final cache = PdfPageImageCache(
+          document: doc,
+          createImageOverride: (_) {
+            createImageStarted.complete();
+            return createImageCompleter.future;
+          },
+        );
+
+        final loadFuture = cache.loadPage(0, fullWidth: 100, fullHeight: 100);
+        expect(cache.hasInFlight(0), isTrue);
+
+        // Complete page.render() so execution enters createImageOverride
+        renderCompleter.complete(mockPdfImage);
+        await createImageStarted.future;
+
+        // Dispose cache while createImage is in flight
+        cache.dispose();
+        expect(cache.isDisposed, isTrue);
+
+        // Now complete createImage
+        createImageCompleter.complete(uiImage);
+        final result = await loadFuture;
+
+        expect(result, isNull);
+        // Both mockPdfImage and uiImage must be disposed
+        expect(mockPdfImage.isDisposed, isTrue);
+        expect(uiImage.debugDisposed, isTrue);
+      },
+    );
+  });
+
+  group('PdfPageContent handle ownership regression tests', () {
+    Future<ui.Image> createTestImage() async {
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      canvas.drawRect(
+        const Rect.fromLTWH(0, 0, 10, 10),
+        Paint()..color = const Color(0xFF00FF00),
+      );
+      final picture = recorder.endRecording();
+      return picture.toImage(10, 10);
+    }
+
+    testWidgets(
+      'cache eviction while widget is mounted leaves widget image handle valid',
+      (tester) async {
+        final cacheImages = <int, ui.Image>{};
+        final doc = _MockPdfDocument(pageCount: 10);
+        final cache = PdfPageImageCache(
+          document: doc,
+          renderOverride: (pageIndex, w, h) async {
+            final img = await createTestImage();
+            cacheImages[pageIndex] = img;
+            return img;
+          },
+        );
+        addTearDown(cache.dispose);
+
+        // Mount PdfPageContent for page 0
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 300,
+                height: 400,
+                child: PdfPageContent(
+                  document: doc,
+                  pageIndex: 0,
+                  constraints: const BoxConstraints(
+                    maxWidth: 300,
+                    maxHeight: 400,
+                  ),
+                  cache: cache,
+                  backgroundColor: Colors.white,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final dynamic state = tester.state(find.byType(PdfPageContent));
+        // ignore: avoid_dynamic_calls
+        final widgetImg = state.debugImage as ui.Image?;
+        expect(widgetImg, isNotNull);
+        expect(widgetImg!.debugDisposed, isFalse);
+        final cacheImg = cacheImages[0]!;
+        expect(cacheImg.debugDisposed, isFalse);
+
+        // Now load 8 more pages in cache (1 through 8), which forces page 0 eviction from cache
+        for (var i = 1; i <= 8; i++) {
+          await cache.loadPage(i, fullWidth: 100, fullHeight: 100);
+        }
+        expect(cache.hasPageCached(0), isFalse);
+        // The cache's own handle for page 0 is now disposed
+        expect(cacheImg.debugDisposed, isTrue);
+
+        // But the mounted widget's own cloned handle is STILL NOT DISPOSED and valid!
+        expect(widgetImg.debugDisposed, isFalse);
+
+        // Pumping and painting continues without error
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+
+        // Unmount the widget: widget disposal must now dispose widgetImg
+        await tester.pumpWidget(const SizedBox.shrink());
+        expect(widgetImg.debugDisposed, isTrue);
+      },
+    );
+
+    testWidgets(
+      'widget disposal disposes widget cloned handle while cache retains its own handle',
+      (tester) async {
+        ui.Image? cacheImg;
+        final doc = _MockPdfDocument(pageCount: 5);
+        final cache = PdfPageImageCache(
+          document: doc,
+          renderOverride: (pageIndex, w, h) async {
+            cacheImg = await createTestImage();
+            return cacheImg;
+          },
+        );
+        addTearDown(cache.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: PdfPageContent(
+                document: doc,
+                pageIndex: 0,
+                constraints: const BoxConstraints(
+                  maxWidth: 300,
+                  maxHeight: 400,
+                ),
+                cache: cache,
+                backgroundColor: Colors.white,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final dynamic state = tester.state(find.byType(PdfPageContent));
+        // ignore: avoid_dynamic_calls
+        final widgetImg = state.debugImage as ui.Image?;
+        expect(widgetImg, isNotNull);
+        expect(widgetImg!.debugDisposed, isFalse);
+        expect(cacheImg!.debugDisposed, isFalse);
+
+        // Unmount widget
+        await tester.pumpWidget(const SizedBox.shrink());
+
+        // Widget handle is disposed
+        expect(widgetImg.debugDisposed, isTrue);
+        // Cache handle remains active and valid
+        expect(cacheImg!.debugDisposed, isFalse);
+        expect(cache.hasPageCached(0), isTrue);
+      },
+    );
+
+    testWidgets(
+      'updating widget pageIndex disposes old cloned handle and acquires new page handle',
+      (tester) async {
+        final doc = _MockPdfDocument(pageCount: 5);
+        final cache = PdfPageImageCache(
+          document: doc,
+          renderOverride: (pageIndex, w, h) async => createTestImage(),
+        );
+        addTearDown(cache.dispose);
+
+        final pageNotifier = ValueNotifier<int>(0);
+        addTearDown(pageNotifier.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: ValueListenableBuilder<int>(
+                valueListenable: pageNotifier,
+                builder: (context, pageIndex, _) => PdfPageContent(
+                  document: doc,
+                  pageIndex: pageIndex,
+                  constraints: const BoxConstraints(
+                    maxWidth: 300,
+                    maxHeight: 400,
+                  ),
+                  cache: cache,
+                  backgroundColor: Colors.white,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final dynamic state = tester.state(find.byType(PdfPageContent));
+        // ignore: avoid_dynamic_calls
+        final oldWidgetImg = state.debugImage as ui.Image?;
+        expect(oldWidgetImg, isNotNull);
+        expect(oldWidgetImg!.debugDisposed, isFalse);
+
+        // Switch page to 1
+        pageNotifier.value = 1;
+        await tester.pumpAndSettle();
+
+        // ignore: avoid_dynamic_calls
+        final newWidgetImg = state.debugImage as ui.Image?;
+        expect(newWidgetImg, isNotNull);
+        expect(newWidgetImg, isNot(same(oldWidgetImg)));
+        expect(newWidgetImg!.debugDisposed, isFalse);
+        // Old handle was cleanly disposed when replaced
+        expect(oldWidgetImg.debugDisposed, isTrue);
+      },
+    );
+
+    testWidgets(
+      'document and cache replacement cancels in-flight fetch and prevents stale display',
+      (tester) async {
+        final doc1 = _MockPdfDocument(pageCount: 5);
+        final doc2 = _MockPdfDocument(pageCount: 5);
+        final completer1 = Completer<ui.Image>();
+        final cache1 = PdfPageImageCache(
+          document: doc1,
+          renderOverride: (pageIndex, w, h) => completer1.future,
+        );
+        final cache2 = PdfPageImageCache(
+          document: doc2,
+          renderOverride: (pageIndex, w, h) async => createTestImage(),
+        );
+        addTearDown(cache1.dispose);
+        addTearDown(cache2.dispose);
+
+        final notifier =
+            ValueNotifier<({PdfDocument doc, PdfPageImageCache cache})>((
+              doc: doc1,
+              cache: cache1,
+            ));
+        addTearDown(notifier.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body:
+                  ValueListenableBuilder<
+                    ({PdfDocument doc, PdfPageImageCache cache})
+                  >(
+                    valueListenable: notifier,
+                    builder: (context, val, _) => PdfPageContent(
+                      document: val.doc,
+                      pageIndex: 0,
+                      constraints: const BoxConstraints(
+                        maxWidth: 300,
+                        maxHeight: 400,
+                      ),
+                      cache: val.cache,
+                      backgroundColor: Colors.white,
+                    ),
+                  ),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        final dynamic state = tester.state(find.byType(PdfPageContent));
+        // ignore: avoid_dynamic_calls
+        expect(state.debugImage, isNull);
+
+        // Now replace document & cache with doc2/cache2 before completer1 finishes
+        notifier.value = (doc: doc2, cache: cache2);
+        await tester.pumpAndSettle();
+
+        // ignore: avoid_dynamic_calls
+        final img2 = state.debugImage as ui.Image?;
+        expect(img2, isNotNull);
+        expect(img2!.debugDisposed, isFalse);
+
+        // If completer1 now finishes late with doc1's image:
+        final lateImg1 = await createTestImage();
+        completer1.complete(lateImg1);
+        await tester.pump();
+
+        // Must still be displaying img2, not doc1's late image
+        // ignore: avoid_dynamic_calls
+        expect(state.debugImage, same(img2));
+      },
+    );
   });
 }
 
 class _MockPdfDocument implements PdfDocument {
-  _MockPdfDocument({this.pageCount = 10});
+  _MockPdfDocument({this.pageCount = 10, List<PdfPage>? customPages})
+    : pages =
+          customPages ??
+          List.generate(pageCount, (index) => _MockPdfPage(index: index));
+
   final int pageCount;
 
   @override
-  late final List<PdfPage> pages = List.generate(
-    pageCount,
-    (index) => _MockPdfPage(index: index),
-  );
+  final List<PdfPage> pages;
 
   @override
   dynamic noSuchMethod(Invocation invocation) {
@@ -354,14 +714,38 @@ class _MockPdfDocument implements PdfDocument {
 }
 
 class _MockPdfPage implements PdfPage {
-  _MockPdfPage({required this.index});
+  _MockPdfPage({required this.index, this.onRender});
   final int index;
+  final Future<PdfImage?> Function(double w, double h)? onRender;
 
   @override
   double get width => 600.0;
 
   @override
   double get height => 800.0;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    if (invocation.memberName == #render) {
+      if (onRender != null) {
+        final named = invocation.namedArguments;
+        final w = named[#fullWidth] as double? ?? 600.0;
+        final h = named[#fullHeight] as double? ?? 800.0;
+        return onRender!(w, h);
+      }
+      return Future<PdfImage?>.value(null);
+    }
+    return super.noSuchMethod(invocation);
+  }
+}
+
+class _MockPdfImage implements PdfImage {
+  bool isDisposed = false;
+
+  @override
+  void dispose() {
+    isDisposed = true;
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
