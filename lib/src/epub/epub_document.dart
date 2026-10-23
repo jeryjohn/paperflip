@@ -223,7 +223,22 @@ class EpubDocument {
   /// `../images/plate.jpg` work, and falls back to a basename match for books
   /// whose manifest paths do not line up with their markup.
   Uint8List? imageFor(String src, {String? fromHref}) {
-    final cleaned = _stripQuery(Uri.decodeFull(src));
+    final trimmed = src.trim();
+    if (trimmed.isEmpty) return null;
+
+    // Do not fetch or resolve external network URLs or data URIs.
+    final lower = trimmed.toLowerCase();
+    if (lower.startsWith('http://') ||
+        lower.startsWith('https://') ||
+        lower.startsWith('//') ||
+        lower.startsWith('data:') ||
+        lower.startsWith('ftp:')) {
+      return null;
+    }
+
+    final cleaned = _stripFragment(_stripQuery(Uri.decodeFull(trimmed)));
+    if (cleaned.isEmpty) return null;
+
     final direct = _images[cleaned];
     if (direct != null) return direct;
 
@@ -253,6 +268,11 @@ class EpubDocument {
   static String _stripQuery(String path) {
     final q = path.indexOf('?');
     return q == -1 ? path : path.substring(0, q);
+  }
+
+  static String _stripFragment(String path) {
+    final h = path.indexOf('#');
+    return h == -1 ? path : path.substring(0, h);
   }
 
   /// Resolves `.` and `..` segments in a archive-relative path.

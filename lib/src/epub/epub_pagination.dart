@@ -70,7 +70,12 @@ class EpubPagination {
     required Map<int, double> heights,
     required int spineLength,
   }) : assert(pageHeight > 0, 'pageHeight must be positive'),
+       assert(spineLength >= 0, 'spineLength must be non-negative'),
        _spineLength = spineLength {
+    if (spineLength <= 0) {
+      _totalPages = 0;
+      return;
+    }
     var running = 0;
     for (var i = 0; i < spineLength; i++) {
       final height = heights[i];
@@ -103,21 +108,34 @@ class EpubPagination {
   int get spineLength => _spineLength;
 
   /// Whether every document has been measured.
-  bool get isComplete => !_measured.contains(false);
+  bool get isComplete => _spineLength == 0 || !_measured.contains(false);
 
   /// How many documents have been measured so far.
   int get measuredCount => _measured.where((m) => m).length;
 
-  /// Pages occupied by [spineIndex].
-  int pagesIn(int spineIndex) =>
-      _pagesPerDocument[spineIndex.clamp(0, _spineLength - 1)];
+  /// Pages occupied by [spineIndex]. Returns 0 if there are no spine documents.
+  int pagesIn(int spineIndex) {
+    if (_spineLength == 0) return 0;
+    return _pagesPerDocument[spineIndex.clamp(0, _spineLength - 1)];
+  }
 
-  /// The first global page of [spineIndex].
-  int startPageOf(int spineIndex) =>
-      _startPage[spineIndex.clamp(0, _spineLength - 1)];
+  /// The first global page of [spineIndex]. Returns 0 if there are no spine documents.
+  int startPageOf(int spineIndex) {
+    if (_spineLength == 0) return 0;
+    return _startPage[spineIndex.clamp(0, _spineLength - 1)];
+  }
 
   /// Resolves a global page number to a document and offset within it.
+  ///
+  /// For an empty book, returns an [EpubPageRef] with all indices at 0.
   EpubPageRef resolve(int globalPage) {
+    if (_spineLength == 0) {
+      return const EpubPageRef(
+        spineIndex: 0,
+        pageInDocument: 0,
+        pagesInDocument: 0,
+      );
+    }
     final page = globalPage.clamp(0, _totalPages - 1);
     // Binary search for the document whose page range contains `page`.
     var low = 0;
@@ -138,7 +156,12 @@ class EpubPagination {
   }
 
   /// The locator for a global page, for storing a reading position.
+  ///
+  /// For an empty book, returns a default [EpubLocator] at spine index 0.
   EpubLocator locatorAt(int globalPage) {
+    if (_spineLength == 0) {
+      return const EpubLocator(spineIndex: 0, progress: 0.0);
+    }
     final ref = resolve(globalPage);
     final progress = ref.pagesInDocument <= 1
         ? 0.0
@@ -152,11 +175,13 @@ class EpubPagination {
   /// The global page that best matches [locator] under this pagination.
   ///
   /// This is what restores the reader's place after a font-size, margin or
-  /// orientation change.
+  /// orientation change. Returns 0 if the book is empty.
   int pageFor(EpubLocator locator) {
+    if (_spineLength == 0) return 0;
     final spine = locator.spineIndex.clamp(0, _spineLength - 1);
     final pages = _pagesPerDocument[spine];
-    final within = (locator.progress * pages).floor().clamp(0, pages - 1);
+    final progress = locator.progress.clamp(0.0, 1.0);
+    final within = (progress * pages).floor().clamp(0, pages - 1);
     return (_startPage[spine] + within).clamp(0, _totalPages - 1);
   }
 
@@ -165,10 +190,18 @@ class EpubPagination {
       other is EpubPagination &&
       other.pageHeight == pageHeight &&
       other._totalPages == _totalPages &&
-      listEquals(other._pagesPerDocument, _pagesPerDocument);
+      other._spineLength == _spineLength &&
+      listEquals(other._pagesPerDocument, _pagesPerDocument) &&
+      listEquals(other._measured, _measured);
 
   @override
-  int get hashCode => Object.hash(pageHeight, _totalPages, _spineLength);
+  int get hashCode => Object.hash(
+    pageHeight,
+    _totalPages,
+    _spineLength,
+    Object.hashAll(_pagesPerDocument),
+    Object.hashAll(_measured),
+  );
 
   @override
   String toString() =>

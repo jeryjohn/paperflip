@@ -1,14 +1,13 @@
 import 'dart:async';
 import 'dart:developer';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import 'package:paperflip/src/paperflip_controller.dart';
 import 'package:paperflip/src/paperflip_pdf.dart';
 import 'package:paperflip/src/flip_settings.dart';
+import 'package:paperflip/src/memory/device_memory.dart';
 import 'package:paperflip/src/page_selector_dialog.dart';
 import 'package:paperflip/src/volume/volume_key_manager.dart';
 
@@ -153,13 +152,6 @@ class _PaperFlipReaderState extends State<PaperFlipReader>
     if (widget.useVolumeKeys) {
       VolumeKeyManager.instance.registerClient(this);
     }
-
-    SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.portraitDown,
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
     _checkDeviceMemory();
   }
 
@@ -178,11 +170,6 @@ class _PaperFlipReaderState extends State<PaperFlipReader>
   @override
   void dispose() {
     VolumeKeyManager.instance.unregisterClient(this);
-    // Hand orientation back to the host app rather than forcing portrait:
-    // an empty list re-applies whatever the platform manifest allows. Flutter
-    // exposes no way to read the previous preference, so this is the closest
-    // we can get to "restore".
-    SystemChrome.setPreferredOrientations(const []);
     _hideControlsTimer?.cancel();
     _flipController.removeListener(_onFlipPageChanged);
     if (_ownsFlipController) _flipController.dispose();
@@ -250,20 +237,18 @@ class _PaperFlipReaderState extends State<PaperFlipReader>
 
     bool isLowMemory = false;
     try {
-      if (Platform.isAndroid) {
-        final memInfo = await File('/proc/meminfo').readAsString();
-        final match = RegExp(r'MemTotal:\s+(\d+)\s+kB').firstMatch(memInfo);
-        if (match != null) {
-          final totalMemKB = int.parse(match.group(1)!);
-          final totalMemMB = totalMemKB ~/ 1024;
-          log('Device total RAM: ${totalMemMB}MB');
-          isLowMemory = totalMemMB < _lowMemoryThresholdMB;
-        }
+      final totalMemMB = await getDeviceTotalMemoryMB();
+      if (totalMemMB != null) {
+        log('Device total RAM: ${totalMemMB}MB');
+        isLowMemory = totalMemMB < _lowMemoryThresholdMB;
+      } else {
+        // Safe fallback on platforms without memory probe (web, iOS, desktop):
+        // do not assume low memory.
+        isLowMemory = false;
       }
     } catch (e) {
       log('Error checking device memory: $e');
-      // Default to lightweight viewer on error to be safe.
-      isLowMemory = true;
+      isLowMemory = false;
     }
     if (mounted) {
       setState(() => _isLowMemoryDevice = isLowMemory);

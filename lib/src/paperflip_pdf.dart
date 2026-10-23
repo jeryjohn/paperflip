@@ -71,7 +71,7 @@ class PaperFlipPdf extends StatefulWidget {
 
 class _PaperFlipPdfState extends State<PaperFlipPdf> {
   PdfDocument? _document;
-  _PdfPageImageCache? _imageCache;
+  PdfPageImageCache? _imageCache;
   Object? _error;
 
   int _loadGeneration = 0;
@@ -99,7 +99,7 @@ class _PaperFlipPdfState extends State<PaperFlipPdf> {
     final document = _document;
     final cache = _imageCache;
     if (document == null || cache == null) return const SizedBox.shrink();
-    return _PdfPageContent(
+    return PdfPageContent(
       document: document,
       pageIndex: index,
       constraints: constraints,
@@ -196,7 +196,7 @@ class _PaperFlipPdfState extends State<PaperFlipPdf> {
         return;
       }
 
-      final cache = _PdfPageImageCache(document: doc);
+      final cache = PdfPageImageCache(document: doc);
 
       setState(() {
         _document = doc;
@@ -309,8 +309,11 @@ class _PaperFlipPdfState extends State<PaperFlipPdf> {
   }
 }
 
-class _PdfPageContent extends StatefulWidget {
-  const _PdfPageContent({
+/// Visible for deterministic testing of widget image handle ownership.
+@visibleForTesting
+class PdfPageContent extends StatefulWidget {
+  const PdfPageContent({
+    super.key,
     required this.document,
     required this.pageIndex,
     required this.constraints,
@@ -321,16 +324,26 @@ class _PdfPageContent extends StatefulWidget {
   final PdfDocument document;
   final int pageIndex;
   final BoxConstraints constraints;
-  final _PdfPageImageCache cache;
+  final PdfPageImageCache cache;
   final Color backgroundColor;
 
   @override
-  State<_PdfPageContent> createState() => _PdfPageContentState();
+  State<PdfPageContent> createState() => _PdfPageContentState();
 }
 
-class _PdfPageContentState extends State<_PdfPageContent> {
+class _PdfPageContentState extends State<PdfPageContent> {
   ui.Image? _image;
   bool _isLoading = false;
+  int _activeRequestId = 0;
+
+  @visibleForTesting
+  ui.Image? get debugImage => _image;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolveImage();
+  }
 
   @override
   void didChangeDependencies() {
@@ -339,24 +352,49 @@ class _PdfPageContentState extends State<_PdfPageContent> {
   }
 
   @override
-  void didUpdateWidget(covariant _PdfPageContent old) {
+  void didUpdateWidget(covariant PdfPageContent old) {
     super.didUpdateWidget(old);
     if (old.pageIndex != widget.pageIndex ||
         old.document != widget.document ||
-        old.constraints.biggest != widget.constraints.biggest) {
+        old.cache != widget.cache) {
+      _activeRequestId++;
+      _isLoading = false;
+      _setImage(null);
       _resolveImage();
+    } else if (old.constraints.biggest != widget.constraints.biggest) {
+      _resolveImage();
+    }
+  }
+
+  @override
+  void dispose() {
+    _activeRequestId++;
+    final old = _image;
+    _image = null;
+    old?.dispose();
+    super.dispose();
+  }
+
+  void _setImage(ui.Image? newImage) {
+    if (_image == newImage) return;
+    final old = _image;
+    _image = newImage;
+    old?.dispose();
+    if (mounted) {
+      setState(() {});
     }
   }
 
   void _resolveImage() {
     if (widget.pageIndex < 0 ||
         widget.pageIndex >= widget.document.pages.length) {
+      _setImage(null);
       return;
     }
 
     final cached = widget.cache.getImageSync(widget.pageIndex);
     if (cached != null) {
-      _image = cached;
+      _setImage(cached.clone());
       return;
     }
 
@@ -366,22 +404,28 @@ class _PdfPageContentState extends State<_PdfPageContent> {
   Future<void> _fetchImage() async {
     if (_isLoading) return;
     _isLoading = true;
+    final requestId = ++_activeRequestId;
 
-    final targetPixelSize = _calculateTargetPixelSize();
-    final img = await widget.cache.loadPage(
-      widget.pageIndex,
-      fullWidth: targetPixelSize.width,
-      fullHeight: targetPixelSize.height,
-    );
+    try {
+      final targetPixelSize = _calculateTargetPixelSize();
+      final img = await widget.cache.loadPage(
+        widget.pageIndex,
+        fullWidth: targetPixelSize.width,
+        fullHeight: targetPixelSize.height,
+      );
 
-    if (!mounted) return;
-    setState(() {
-      _image = img;
-      _isLoading = false;
-    });
+      if (!mounted || requestId != _activeRequestId) return;
+      _setImage(img?.clone());
 
-    if (img != null) {
-      PageReadyNotification(pageIndex: widget.pageIndex).dispatch(context);
+      if (img != null) {
+        PageReadyNotification(pageIndex: widget.pageIndex).dispatch(context);
+      }
+    } catch (_) {
+      // Keep loading state from being stuck permanently on render failure.
+    } finally {
+      if (requestId == _activeRequestId) {
+        _isLoading = false;
+      }
     }
   }
 
@@ -430,7 +474,7 @@ class _PdfPageContentState extends State<_PdfPageContent> {
     }
 
     final fitSize = _calculateFitSize();
-    final image = _image ?? widget.cache.getImageSync(widget.pageIndex);
+    final image = _image;
     final isReady = image != null;
 
     return PageCaptureGuard(
@@ -468,10 +512,27 @@ class _PdfPageContentState extends State<_PdfPageContent> {
 }
 
 class _PdfPageImageCache {
-  _PdfPageImageCache({required this.document});
+  _PdfPageImageCache({
+    required this.document,
+    this.renderOverride,
+    @visibleForTesting this.createImageOverride,
+  });
 
   final PdfDocument document;
+  final Future<ui.Image?> Function(
+    int pageIndex,
+    double fullWidth,
+    double fullHeight,
+  )?
+  renderOverride;
+
+  @visibleForTesting
+  final Future<ui.Image> Function(PdfImage pdfImage)? createImageOverride;
+
   static const int _maxEntries = 8;
+
+  bool _isDisposed = false;
+  bool get isDisposed => _isDisposed;
 
   final Map<int, ui.Image> _images = {};
   final Map<int, Future<ui.Image?>> _inFlight = {};
@@ -479,6 +540,7 @@ class _PdfPageImageCache {
   Size? _lastPixelSize;
 
   ui.Image? getImageSync(int pageIndex) {
+    if (_isDisposed) return null;
     final img = _images[pageIndex];
     if (img != null) {
       _touch(pageIndex);
@@ -497,6 +559,7 @@ class _PdfPageImageCache {
     required double fullWidth,
     required double fullHeight,
   }) async {
+    if (_isDisposed) return null;
     if (pageIndex < 0 || pageIndex >= document.pages.length) return null;
 
     _lastPixelSize = Size(fullWidth, fullHeight);
@@ -517,7 +580,15 @@ class _PdfPageImageCache {
 
     try {
       final img = await future;
+      if (_isDisposed) {
+        img?.dispose();
+        return null;
+      }
       if (img != null) {
+        final oldImg = _images[pageIndex];
+        if (oldImg != null && oldImg != img) {
+          oldImg.dispose();
+        }
         _images[pageIndex] = img;
         _touch(pageIndex);
         _trim();
@@ -533,21 +604,42 @@ class _PdfPageImageCache {
     double fullWidth,
     double fullHeight,
   ) async {
-    if (pageIndex < 0 || pageIndex >= document.pages.length) return null;
-    final page = document.pages[pageIndex];
+    if (_isDisposed) return null;
     try {
+      if (renderOverride != null) {
+        return await renderOverride!(pageIndex, fullWidth, fullHeight);
+      }
+      if (pageIndex < 0 || pageIndex >= document.pages.length) return null;
+      final page = document.pages[pageIndex];
       final pdfImage = await page.render(
         fullWidth: fullWidth,
         fullHeight: fullHeight,
       );
       if (pdfImage == null) return null;
-      return await pdfImage.createImage();
+      if (_isDisposed) {
+        pdfImage.dispose();
+        return null;
+      }
+      ui.Image image;
+      try {
+        image = await (createImageOverride != null
+            ? createImageOverride!(pdfImage)
+            : pdfImage.createImage());
+      } finally {
+        pdfImage.dispose();
+      }
+      if (_isDisposed) {
+        image.dispose();
+        return null;
+      }
+      return image;
     } catch (_) {
       return null;
     }
   }
 
   void preload(int pageIndex) {
+    if (_isDisposed) return;
     if (pageIndex < 0 ||
         pageIndex >= document.pages.length ||
         _images.containsKey(pageIndex) ||
@@ -571,6 +663,8 @@ class _PdfPageImageCache {
   }
 
   void dispose() {
+    if (_isDisposed) return;
+    _isDisposed = true;
     _inFlight.clear();
     for (final img in _images.values) {
       img.dispose();
@@ -578,6 +672,28 @@ class _PdfPageImageCache {
     _images.clear();
     _lru.clear();
   }
+}
+
+/// Internal image cache for rendered PDF pages.
+///
+/// Marked [visibleForTesting] so its disposal and asynchronous loading lifecycle
+/// can be directly validated without depending on hardware PDF rendering.
+@visibleForTesting
+class PdfPageImageCache extends _PdfPageImageCache {
+  PdfPageImageCache({
+    required super.document,
+    super.renderOverride,
+    @visibleForTesting super.createImageOverride,
+  });
+
+  @visibleForTesting
+  int get cachedCount => _images.length;
+
+  @visibleForTesting
+  bool hasPageCached(int pageIndex) => _images.containsKey(pageIndex);
+
+  @visibleForTesting
+  bool hasInFlight(int pageIndex) => _inFlight.containsKey(pageIndex);
 }
 
 class _DefaultLoadingIndicator extends StatelessWidget {

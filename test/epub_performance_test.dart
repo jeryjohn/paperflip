@@ -116,4 +116,68 @@ void main() {
       }
     });
   });
+
+  group('EpubDataSource construction benchmark', () {
+    test('measures source construction cost across 1MB, 5MB, and 10MB arrays', () {
+      final sizes = [
+        ('1 MB', 1 * 1024 * 1024),
+        ('5 MB', 5 * 1024 * 1024),
+        ('10 MB', 10 * 1024 * 1024),
+      ];
+
+      for (final (label, size) in sizes) {
+        // Deterministic pseudo-random bytes
+        final bytes = Uint8List(size);
+        for (var i = 0; i < size; i++) {
+          bytes[i] = (i * 31 + 17) & 0xFF;
+        }
+
+        // Warmup
+        for (var i = 0; i < 5; i++) {
+          EpubSource.data(bytes);
+          EpubSource.data(bytes, id: 'warmup');
+        }
+
+        // Timed runs without explicit ID (Snapshot + Digest)
+        final timesWithoutId = <double>[];
+        for (var i = 0; i < 15; i++) {
+          final sw = Stopwatch()..start();
+          final src = EpubSource.data(bytes);
+          sw.stop();
+          expect(src.cacheKey, isNotEmpty);
+          timesWithoutId.add(sw.elapsedMicroseconds / 1000.0);
+        }
+        timesWithoutId.sort();
+        final medianWithoutId = timesWithoutId[timesWithoutId.length ~/ 2];
+        final meanWithoutId =
+            timesWithoutId.reduce((a, b) => a + b) / timesWithoutId.length;
+
+        // Timed runs with explicit ID (Snapshot only, digest bypassed)
+        final timesWithId = <double>[];
+        for (var i = 0; i < 15; i++) {
+          final sw = Stopwatch()..start();
+          final src = EpubSource.data(bytes, id: 'v1');
+          sw.stop();
+          expect(src.cacheKey, isNotEmpty);
+          timesWithId.add(sw.elapsedMicroseconds / 1000.0);
+        }
+        timesWithId.sort();
+        final medianWithId = timesWithId[timesWithId.length ~/ 2];
+        final meanWithId =
+            timesWithId.reduce((a, b) => a + b) / timesWithId.length;
+
+        debugPrint(
+          '[Benchmark $label - $size bytes]\n'
+          '  Without ID (Copy + Digest): min=${timesWithoutId.first.toStringAsFixed(2)}ms, '
+          'median=${medianWithoutId.toStringAsFixed(2)}ms, '
+          'mean=${meanWithoutId.toStringAsFixed(2)}ms, '
+          'max=${timesWithoutId.last.toStringAsFixed(2)}ms\n'
+          '  With ID (Copy only):        min=${timesWithId.first.toStringAsFixed(2)}ms, '
+          'median=${medianWithId.toStringAsFixed(2)}ms, '
+          'mean=${meanWithId.toStringAsFixed(2)}ms, '
+          'max=${timesWithId.last.toStringAsFixed(2)}ms',
+        );
+      }
+    });
+  });
 }

@@ -28,26 +28,213 @@ void main() {
   group('EpubSource', () {
     test('sources compare by value', () {
       expect(
-        const EpubSource.network('https://example.com/a.epub'),
-        const EpubSource.network('https://example.com/a.epub'),
+        EpubSource.network('https://example.com/a.epub'),
+        EpubSource.network('https://example.com/a.epub'),
       );
       expect(
-        const EpubSource.network('https://example.com/a.epub'),
-        isNot(const EpubSource.network('https://example.com/b.epub')),
+        EpubSource.network('https://example.com/a.epub'),
+        isNot(EpubSource.network('https://example.com/b.epub')),
       );
       expect(
         const EpubSource.file('/tmp/a.epub'),
-        isNot(const EpubSource.network('/tmp/a.epub')),
+        isNot(EpubSource.network('/tmp/a.epub')),
         reason: 'different kinds with the same string are not equal',
       );
     });
 
     test('cache keys are namespaced per kind', () {
       expect(
-        const EpubSource.network('x').cacheKey,
+        EpubSource.network('x').cacheKey,
         isNot(const EpubSource.asset('x').cacheKey),
       );
     });
+
+    test('network sources with equivalent headers are equal', () {
+      final s1 = EpubSource.network(
+        'https://example.com/book.epub',
+        headers: const {
+          'Authorization': 'Bearer token123',
+          'Accept': 'application/epub+zip',
+        },
+      );
+      final s2 = EpubSource.network(
+        'https://example.com/book.epub',
+        headers: const {
+          'Accept': 'application/epub+zip',
+          'Authorization': 'Bearer token123',
+        },
+      );
+      expect(s1, equals(s2));
+      expect(s1.cacheKey, equals(s2.cacheKey));
+      expect(s1.hashCode, equals(s2.hashCode));
+    });
+
+    test('network sources with different headers have distinct identity', () {
+      final s1 = EpubSource.network(
+        'https://example.com/book.epub',
+        headers: const {'Authorization': 'Bearer token1'},
+      );
+      final s2 = EpubSource.network(
+        'https://example.com/book.epub',
+        headers: const {'Authorization': 'Bearer token2'},
+      );
+      expect(s1, isNot(equals(s2)));
+      expect(s1.cacheKey, isNot(equals(s2.cacheKey)));
+    });
+
+    test(
+      'network sources never expose sensitive headers in cacheKey or toString',
+      () {
+        const secret = 'super-secret-auth-token-xyz';
+        final s = EpubSource.network(
+          'https://example.com/book.epub',
+          headers: const {'Authorization': 'Bearer $secret'},
+        );
+        expect(s.cacheKey, isNot(contains(secret)));
+        expect(s.displayName, isNot(contains(secret)));
+        expect(s.toString(), isNot(contains(secret)));
+      },
+    );
+
+    test('network source caller-supplied id takes precedence', () {
+      final s1 = EpubSource.network(
+        'https://example.com/book.epub',
+        id: 'revision-1',
+      );
+      final s2 = EpubSource.network(
+        'https://example.com/book.epub',
+        id: 'revision-2',
+      );
+      expect(s1, isNot(equals(s2)));
+      expect(s1.cacheKey, contains('revision-1'));
+      expect(s2.cacheKey, contains('revision-2'));
+    });
+
+    test(
+      'mutating caller headers map after construction does not alter identity',
+      () {
+        final mutableHeaders = <String, String>{
+          'Authorization': 'Bearer initial',
+        };
+        final source = EpubSource.network(
+          'https://example.com/book.epub',
+          headers: mutableHeaders,
+        );
+        final initialKey = source.cacheKey;
+        final initialHash = source.hashCode;
+
+        mutableHeaders['Authorization'] = 'Bearer mutated';
+        mutableHeaders['Extra'] = 'value';
+
+        expect(source.cacheKey, equals(initialKey));
+        expect(source.hashCode, equals(initialHash));
+      },
+    );
+
+    test(
+      'in-memory data sources compare by value and detect content changes',
+      () {
+        final bytesA1 = Uint8List.fromList([1, 2, 3, 4, 5]);
+        final bytesA2 = Uint8List.fromList([1, 2, 3, 4, 5]);
+        final bytesB = Uint8List.fromList([1, 2, 9, 4, 5]);
+
+        final sA1 = EpubSource.data(bytesA1);
+        final sA2 = EpubSource.data(bytesA2);
+        final sB = EpubSource.data(bytesB);
+
+        // Equivalent bytes produce the same identity and are equal
+        expect(sA1, equals(sA2));
+        expect(sA1.cacheKey, equals(sA2.cacheKey));
+
+        // Changed bytes produce a different identity
+        expect(sA1, isNot(equals(sB)));
+        expect(sA1.cacheKey, isNot(equals(sB.cacheKey)));
+      },
+    );
+
+    test('in-memory data sources support explicit caller-supplied id', () {
+      final bytes = Uint8List.fromList([1, 2, 3]);
+      final s1 = EpubSource.data(bytes, id: 'doc-v1');
+      final s2 = EpubSource.data(bytes, id: 'doc-v2');
+
+      expect(s1, isNot(equals(s2)));
+      expect(s1.cacheKey, contains('doc-v1'));
+      expect(s2.cacheKey, contains('doc-v2'));
+    });
+
+    test(
+      'detects content changes in middle regions that were previously unsampled',
+      () {
+        final bytesA = Uint8List(8192);
+        bytesA[0] = 1;
+        final bytesB = Uint8List(8192);
+        bytesB[0] = 1;
+        // Offset 2048 was between the first 1024 bytes and the middle sample in the old code
+        bytesB[2048] = 42;
+
+        final sourceA = EpubSource.data(bytesA);
+        final sourceB = EpubSource.data(bytesB);
+
+        expect(sourceA, isNot(equals(sourceB)));
+        expect(sourceA.cacheKey, isNot(equals(sourceB.cacheKey)));
+        expect(sourceA.hashCode, isNot(equals(sourceB.hashCode)));
+      },
+    );
+
+    test(
+      'mutating input byte array after construction does not alter stored source or identity',
+      () async {
+        final rawBytes = Uint8List.fromList([10, 20, 30, 40]);
+        final source = EpubSource.data(rawBytes);
+        final expectedKey = source.cacheKey;
+
+        rawBytes[0] = 99;
+        rawBytes[1] = 88;
+
+        expect(source.cacheKey, equals(expectedKey));
+        final loaded = await source.load();
+        expect(loaded[0], 10);
+        expect(loaded[1], 20);
+      },
+    );
+
+    test(
+      'mutating data returned from load or bytes getter does not alter stored source',
+      () async {
+        final source = EpubSource.data(Uint8List.fromList([1, 2, 3]));
+        final loaded = await source.load();
+        loaded[0] = 99;
+
+        final loadedAgain = await source.load();
+        expect(loadedAgain[0], 1);
+
+        if (source is EpubDataSource) {
+          final exposed = source.bytes;
+          exposed[0] = 77;
+          final loadedThird = await source.load();
+          expect(loadedThird[0], 1);
+        }
+      },
+    );
+
+    test(
+      'handles empty input and realistically large inputs efficiently',
+      () async {
+        final emptySource = EpubSource.data(Uint8List(0));
+        expect(emptySource.cacheKey, contains('0_'));
+
+        // 500 KB test payload
+        final largeBytes = Uint8List(500 * 1024);
+        largeBytes[250 * 1024] = 0xAA;
+        final stopwatch = Stopwatch()..start();
+        final largeSource = EpubSource.data(largeBytes);
+        stopwatch.stop();
+
+        expect(largeSource.cacheKey, contains('${500 * 1024}_'));
+        // Hashing 500 KB should complete in well under 200 ms without BigInt allocation overhead
+        expect(stopwatch.elapsedMilliseconds, lessThan(200));
+      },
+    );
 
     test('a missing file reports a useful error', () async {
       await expectLater(
@@ -164,5 +351,57 @@ void main() {
         throwsA(isA<EpubLoadException>()),
       );
     });
+
+    test(
+      'image resolution rejects external network URLs and data URIs',
+      () async {
+        final bytes = _read('pg28885.epub');
+        if (bytes == null) {
+          markTestSkipped('fixture pg28885.epub not present');
+          return;
+        }
+        final doc = await EpubDocument.open(EpubSource.data(bytes));
+
+        // External HTTP/HTTPS
+        expect(doc.imageFor('https://example.com/image.jpg'), isNull);
+        expect(doc.imageFor('http://example.com/image.jpg'), isNull);
+        expect(doc.imageFor('//example.com/image.jpg'), isNull);
+
+        // Data URIs
+        expect(
+          doc.imageFor(
+            'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+          ),
+          isNull,
+        );
+
+        // Missing resource
+        expect(doc.imageFor('non_existent_image_12345.jpg'), isNull);
+
+        // Relative path with query / fragment strips and resolves
+        final known = doc.spine.firstWhere((s) => s.html.contains('<img'));
+        final match = RegExp(
+          r'''<img[^>]+src=["']([^"']+)["']''',
+        ).firstMatch(known.html);
+        if (match != null) {
+          final rawSrc = match.group(1)!;
+          final normal = doc.imageFor(rawSrc, fromHref: known.href);
+          expect(normal, isNotNull);
+
+          // With fragment attached
+          final withFragment = doc.imageFor(
+            '$rawSrc#xywh=0,0,10,10',
+            fromHref: known.href,
+          );
+          expect(withFragment, isNotNull);
+          expect(withFragment, equals(normal));
+
+          // With query param attached
+          final withQuery = doc.imageFor('$rawSrc?v=123', fromHref: known.href);
+          expect(withQuery, isNotNull);
+          expect(withQuery, equals(normal));
+        }
+      },
+    );
   });
 }
