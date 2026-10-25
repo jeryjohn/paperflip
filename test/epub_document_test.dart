@@ -236,6 +236,132 @@ void main() {
       },
     );
 
+    test(
+      'regression: produces deterministic repeatable digests for known content bytes',
+      () {
+        final empty = EpubSource.data(Uint8List(0));
+        expect(empty.cacheKey, equals('data:memory:0_050c5d1f26bd533f'));
+
+        final sample = EpubSource.data(Uint8List.fromList([1, 2, 3, 4, 5]));
+        expect(sample.cacheKey, equals('data:memory:5_106e446b2b4def4a'));
+
+        final pattern = Uint8List(300);
+        for (var i = 0; i < pattern.length; i++) {
+          pattern[i] = (i * 31 + 7) & 0xFF;
+        }
+        final patternSource = EpubSource.data(pattern);
+        expect(
+          patternSource.cacheKey,
+          equals('data:memory:300_5886c93f0439e5e0'),
+        );
+        // Ensure repeated calls produce the exact same digest
+        expect(
+          EpubSource.data(pattern).cacheKey,
+          equals(patternSource.cacheKey),
+        );
+      },
+    );
+
+    test(
+      'regression: changed input bytes in any position alter the digest',
+      () {
+        final baseBytes = Uint8List.fromList([10, 20, 30, 40, 50, 60]);
+        final baseKey = EpubSource.data(baseBytes).cacheKey;
+
+        // First byte changed
+        final startChanged = Uint8List.fromList([11, 20, 30, 40, 50, 60]);
+        expect(EpubSource.data(startChanged).cacheKey, isNot(equals(baseKey)));
+
+        // Middle byte changed
+        final midChanged = Uint8List.fromList([10, 20, 31, 40, 50, 60]);
+        expect(EpubSource.data(midChanged).cacheKey, isNot(equals(baseKey)));
+
+        // Last byte changed
+        final endChanged = Uint8List.fromList([10, 20, 30, 40, 50, 61]);
+        expect(EpubSource.data(endChanged).cacheKey, isNot(equals(baseKey)));
+
+        // Single bit flip
+        final bitFlipped = Uint8List.fromList([10, 20, 30, 40 ^ 0x01, 50, 60]);
+        expect(EpubSource.data(bitFlipped).cacheKey, isNot(equals(baseKey)));
+
+        // Truncated length
+        final truncated = Uint8List.fromList([10, 20, 30, 40, 50]);
+        expect(EpubSource.data(truncated).cacheKey, isNot(equals(baseKey)));
+
+        // Appended byte
+        final appended = Uint8List.fromList([10, 20, 30, 40, 50, 60, 70]);
+        expect(EpubSource.data(appended).cacheKey, isNot(equals(baseKey)));
+      },
+    );
+
+    test(
+      'regression: produces deterministic repeatable digests for network headers',
+      () {
+        final s = EpubSource.network(
+          'https://example.com/test.epub',
+          headers: const {
+            'Authorization': 'Bearer 12345',
+            'Accept': 'application/epub+zip',
+          },
+        );
+        expect(
+          s.cacheKey,
+          equals('network:https://example.com/test.epub#278cf6ed3633e672'),
+        );
+
+        // Header case variation maintains determinism
+        final sCase = EpubSource.network(
+          'https://example.com/test.epub',
+          headers: const {
+            'authorization': 'Bearer 12345',
+            'ACCEPT': 'application/epub+zip',
+          },
+        );
+        expect(sCase.cacheKey, equals(s.cacheKey));
+      },
+    );
+
+    test('regression: changed network headers alter the digest', () {
+      const url = 'https://example.com/test.epub';
+      final base = EpubSource.network(
+        url,
+        headers: const {'Authorization': 'Bearer 12345', 'X-Version': '1'},
+      );
+      final baseKey = base.cacheKey;
+
+      // Changed value
+      final valueChanged = EpubSource.network(
+        url,
+        headers: const {'Authorization': 'Bearer 12346', 'X-Version': '1'},
+      );
+      expect(valueChanged.cacheKey, isNot(equals(baseKey)));
+
+      // Changed key
+      final keyChanged = EpubSource.network(
+        url,
+        headers: const {'Auth': 'Bearer 12345', 'X-Version': '1'},
+      );
+      expect(keyChanged.cacheKey, isNot(equals(baseKey)));
+
+      // Added header
+      final added = EpubSource.network(
+        url,
+        headers: const {
+          'Authorization': 'Bearer 12345',
+          'X-Version': '1',
+          'X-Extra': 'true',
+        },
+      );
+      expect(added.cacheKey, isNot(equals(baseKey)));
+
+      // Removed header
+      final removed = EpubSource.network(
+        url,
+        headers: const {'Authorization': 'Bearer 12345'},
+      );
+      expect(removed.cacheKey, isNot(equals(baseKey)));
+    });
+
     test('a missing file reports a useful error', () async {
       await expectLater(
         const EpubSource.file('/definitely/not/here.epub').load(),
