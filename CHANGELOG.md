@@ -6,9 +6,11 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-25
+
 ### Added
 
-- Initial public release of Paperflip (prepared for 0.1.0).
+- Initial public release of Paperflip.
 - Mesh-based 3D page-curl engine with physical lighting, dynamic shadows, and drag-to-curl interaction.
 - Reflowable EPUB reader with document parsing, HTML-based content rendering, pagination, reader settings (font sizing, themes, margins, line heights), and reading-position restoration.
 - PDF page-flip integration built on `pdfrx`, with progressive rendering, bounded LRU caching, and safe image lifecycle management.

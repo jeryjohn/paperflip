@@ -143,8 +143,8 @@ final class EpubNetworkSource extends EpubSource {
     for (final entry in sortedEntries) {
       final pair = '${entry.key.toLowerCase()}:${entry.value}\n';
       for (final unit in pair.codeUnits) {
-        h1 = ((h1 ^ unit) * p1) & 0xFFFFFFFF;
-        h2 = ((h2 ^ (unit + 7)) * p2) & 0xFFFFFFFF;
+        h1 = _mul32(h1 ^ unit, p1);
+        h2 = _mul32(h2 ^ (unit + 7), p2);
       }
     }
 
@@ -234,17 +234,36 @@ final class EpubDataSource extends EpubSource {
     const p2 = 0x01000193;
 
     // Mix length
-    h1 = ((h1 ^ len) * p1) & 0xFFFFFFFF;
-    h2 = ((h2 ^ (len >> 8)) * p2) & 0xFFFFFFFF;
+    h1 = _mul32(h1 ^ len, p1);
+    h2 = _mul32(h2 ^ (len >> 8), p2);
 
     for (var i = 0; i < len; i++) {
       final b = bytes[i];
-      h1 = ((h1 ^ b) * p1) & 0xFFFFFFFF;
-      h2 = ((h2 ^ (b + (i & 0xFF))) * p2) & 0xFFFFFFFF;
+      h1 = _mul32(h1 ^ b, p1);
+      h2 = _mul32(h2 ^ (b + (i & 0xFF)), p2);
     }
 
     return '${len}_${h1.toRadixString(16).padLeft(8, '0')}${h2.toRadixString(16).padLeft(8, '0')}';
   }
+}
+
+/// Multiplies two 32-bit unsigned integers modulo 2^32 deterministically across
+/// native Dart (64-bit int) and Flutter Web (JavaScript IEEE-754 numbers).
+///
+/// Splitting operands into 16-bit halves ensures all intermediate products
+/// stay well within 32 bits, avoiding JavaScript's 53-bit precision boundary
+/// where 64-bit multiplication truncates low-order bits on web runtimes.
+int _mul32(int a, int b) {
+  final ua = a.toUnsigned(32);
+  final ub = b.toUnsigned(32);
+  final aLow = ua & 0xffff;
+  final aHigh = (ua >> 16) & 0xffff;
+  final bLow = ub & 0xffff;
+  final bHigh = (ub >> 16) & 0xffff;
+
+  final low = aLow * bLow;
+  final mid = (aLow * bHigh + aHigh * bLow) & 0xffff;
+  return (low + (mid * 65536)).toUnsigned(32);
 }
 
 /// Thrown when an EPUB cannot be fetched or opened.
