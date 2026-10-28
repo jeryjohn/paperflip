@@ -22,4 +22,7 @@ export 'src/mesh_paperflip.dart';
 export 'src/page_builder.dart';
 export 'src/page_selector_dialog.dart';
 export 'src/volume/volume_key_manager.dart';
+// Required by Flutter's generated Dart plugin registrant for Windows.
+// This implementation intentionally registers no native event channel.
+export 'src/platform/paperflip_noop_plugin.dart' show PaperflipNoopPlugin;
 export 'package:pdfrx/pdfrx.dart';

@@ -19,7 +19,7 @@ class _CommonScreenState extends State<CommonScreen> {
       theme: EpubTheme.light,
     ),
   );
-  bool _useVolumeKeys = true;
+  bool _useVolumeKeys = false;
 
   @override
   void dispose() {

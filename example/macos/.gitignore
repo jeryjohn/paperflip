@@ -1,0 +1,30 @@
+# Flutter-related
+**/Flutter/ephemeral/
+**/Flutter/Generated.xcconfig
+**/Flutter/flutter_export_environment.sh
+**/Flutter/.last_build_id
+**/Flutter/GeneratedPluginRegistrant.*
+**/Pods/
+
+# Xcode-related
+**/dgph
+**/xcuserdata/
+**/*.xcuserstate
+**/*.xcscmblueprint
+**/*.moved-aside
+**/*.mode1v3
+**/*.mode2v3
+**/*.perspectivev3
+**/*.pbxuser
+**/DerivedData/
+**/*.hmap
+**/*.ipa
+**/*.dSYM.zip
+**/*.dSYM
+
+# Swift Package Manager
+**/.swiftpm/
+
+# macOS system
+.DS_Store
+**/.DS_Store

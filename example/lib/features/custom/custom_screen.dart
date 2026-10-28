@@ -11,7 +11,7 @@ class CustomScreen extends StatefulWidget {
 class _CustomScreenState extends State<CustomScreen> {
   final PaperFlipController _controller = PaperFlipController();
   bool _curlEnabled = true;
-  bool _useVolumeKeys = true;
+  bool _useVolumeKeys = false;
   int _currentPage = 0;
   static const _pageCount = 8;
 

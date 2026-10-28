@@ -373,11 +373,13 @@ class MeshPaperFlipState extends State<MeshPaperFlip>
 
   @override
   void onVolumeUp() {
+    debugPrint('[Paperflip Dart] MeshPaperFlip onVolumeUp -> flipNext()');
     _effectiveController.flipNext();
   }
 
   @override
   void onVolumeDown() {
+    debugPrint('[Paperflip Dart] MeshPaperFlip onVolumeDown -> flipPrev()');
     _effectiveController.flipPrev();
   }
 

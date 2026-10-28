@@ -16,7 +16,7 @@ class PdfScreen extends StatefulWidget {
 
 class _PdfScreenState extends State<PdfScreen> {
   final _controller = PaperFlipController();
-  bool _useVolumeKeys = true;
+  bool _useVolumeKeys = false;
   int _currentPage = 0;
   int _pageCount = 50;
 

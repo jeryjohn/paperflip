@@ -248,12 +248,25 @@ Paperflip builds on the Flutter widget/rendering system and uses supporting pack
 The exact dependency versions are declared in `pubspec.yaml`.
 
 ## Platform support
-Paperflip supports Android, iOS, macOS, Windows, Linux, and Web:
-- **Android**: Full support, including optional hardware volume button page turns.
-- **iOS, macOS, Windows, Linux**: Full support for custom widgets, EPUB, and PDF rendering.
-- **Web**: Supported for custom widgets, PDF rendering, and network, asset, and in-memory EPUB sources (`EpubSource.file` is unsupported on web).
 
-Always test your application on your target devices and operating system versions before shipping.
+Paperflip officially supports **Android, iOS, and macOS**.
+
+| Platform | Core Reader & Flip Engine | Hardware Volume Navigation (`useVolumeKeys: true`) | Status |
+| :--- | :--- | :--- | :--- |
+| **Android** | Supported | Supported (hardware key-event interception) | Verified |
+| **iOS** | Supported | Best-effort (`AVAudioSession.outputVolume` KVO) | Reader verified; volume keys unverified on hardware |
+| **macOS** | Supported | Not supported (no native volume-key listener) | Verified |
+
+### Hardware volume navigation
+
+Hardware volume navigation is opt-in via `useVolumeKeys: true` (default is `false` across all reader widgets and example screens):
+
+- **Android:** The native plugin intercepts volume-key events while an opted-in reader is active. Key presses navigate pages without altering system volume during reading.
+- **iOS:** Paperflip observes `AVAudioSession.outputVolume` changes via KVO and infers direction. It does not intercept raw hardware key-down events or suppress system volume HUD behavior. No event can be detected when volume is already at its minimum (0%) or maximum (100%). Plugin registration, channel subscription, and audio-session lifecycle are verified in simulator builds, but physical button navigation remains unverified until tested on a physical iPhone.
+- **macOS:** Reader widgets and controllers are fully functional, but volume-key navigation is unsupported.
+- **Windows, Linux, and Web:** Not currently included in the official platform support matrix for this release.
+
+Apple documents observing `AVAudioSession.outputVolume` via KVO, but App Review Guideline 2.5.9 warns against altering standard volume-button behavior. The iOS implementation leaves system volume functional and operates strictly on a best-effort basis rather than a guaranteed hardware-button event API.
 
 ## Testing and analysis
 Run these commands from the package root:

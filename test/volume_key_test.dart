@@ -78,14 +78,43 @@ void main() {
       },
     );
 
-    test('cross-platform: does not listen on non-Android platforms', () {
-      VolumeKeyManager.debugPlatformOverride = TargetPlatform.iOS;
-      final client = _MockVolumeKeyClient();
+    test(
+      'cross-platform: listens on Android and iOS, but not on unsupported platforms',
+      () {
+        final client = _MockVolumeKeyClient();
 
-      VolumeKeyManager.instance.registerClient(client);
-      expect(VolumeKeyManager.instance.clientCount, 1);
-      expect(VolumeKeyManager.instance.isListening, isFalse);
-    });
+        // Android: supported
+        VolumeKeyManager.debugPlatformOverride = TargetPlatform.android;
+        VolumeKeyManager.instance.registerClient(client);
+        expect(VolumeKeyManager.instance.isListening, isTrue);
+        VolumeKeyManager.instance.unregisterClient(client);
+        expect(VolumeKeyManager.instance.isListening, isFalse);
+
+        // iOS: supported
+        VolumeKeyManager.debugPlatformOverride = TargetPlatform.iOS;
+        VolumeKeyManager.instance.registerClient(client);
+        expect(VolumeKeyManager.instance.isListening, isTrue);
+        VolumeKeyManager.instance.unregisterClient(client);
+        expect(VolumeKeyManager.instance.isListening, isFalse);
+
+        // Unsupported platforms
+        for (final unsupported in [
+          TargetPlatform.macOS,
+          TargetPlatform.windows,
+          TargetPlatform.linux,
+          TargetPlatform.fuchsia,
+        ]) {
+          VolumeKeyManager.debugPlatformOverride = unsupported;
+          VolumeKeyManager.instance.registerClient(client);
+          expect(
+            VolumeKeyManager.instance.isListening,
+            isFalse,
+            reason: 'Expected not to listen on $unsupported',
+          );
+          VolumeKeyManager.instance.unregisterClient(client);
+        }
+      },
+    );
   });
 
   group('MeshPaperFlip Volume Keys', () {

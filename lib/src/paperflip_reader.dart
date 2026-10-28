@@ -178,6 +178,7 @@ class _PaperFlipReaderState extends State<PaperFlipReader>
 
   @override
   void onVolumeUp() {
+    debugPrint('[Paperflip Dart] PaperFlipReader onVolumeUp');
     if (_isLowMemoryDevice == true || _zoomMode) {
       if (_pageCount > 0 && _currentPage < _pageCount) {
         _jumpToPage(_currentPage + 1);
@@ -189,6 +190,7 @@ class _PaperFlipReaderState extends State<PaperFlipReader>
 
   @override
   void onVolumeDown() {
+    debugPrint('[Paperflip Dart] PaperFlipReader onVolumeDown');
     if (_isLowMemoryDevice == true || _zoomMode) {
       if (_pageCount > 0 && _currentPage > 1) {
         _jumpToPage(_currentPage - 1);

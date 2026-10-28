@@ -86,6 +86,7 @@ key.properties
 **/.symlinks/
 **/Flutter/ephemeral/
 **/Flutter/Generated.xcconfig
+**/Flutter/Flutter-Generated.xcconfig
 **/Flutter/flutter_export_environment.sh
 **/Flutter/App.framework
 **/Flutter/Flutter.framework
@@ -102,7 +103,7 @@ key.properties
 **/*.xcuserstate
 **/project.xcworkspace/xcuserdata/
 **/xcuserdata/
-**/Runner/GeneratedPluginRegistrant.*
+**/GeneratedPluginRegistrant.*
 **/.last_build_id
 
 # ------------------------------------------------------------------------------
@@ -121,11 +122,27 @@ test/fixtures/*.epub
 # FVM generated SDK files
 .fvm/
 
-# Root-level leftover application scaffolding (example app has its own platform folders under example/)
+# Root Flutter app scaffolding (runnable application runners belong under example/)
 /android/app/
 /android/gradle/
+/android/gradle.properties
+/android/settings.gradle
+/ios/Flutter/
 /ios/Runner/
+/ios/Runner.xcodeproj/
+/ios/Runner.xcworkspace/
+/ios/RunnerTests/
+/linux/flutter/
 /linux/runner/
+/macos/Flutter/
 /macos/Runner/
-/windows/runner/
+/macos/Runner.xcodeproj/
+/macos/Runner.xcworkspace/
+/macos/RunnerTests/
 /web/icons/
+/web/index.html
+/web/manifest.json
+/web/favicon.png
+/windows/flutter/
+/windows/runner/
+/windows/runner.sln

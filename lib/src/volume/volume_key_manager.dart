@@ -5,24 +5,25 @@ import 'package:flutter/services.dart';
 
 /// Client interface for widgets receiving hardware volume-key navigation events.
 abstract interface class VolumeKeyClient {
-  /// Invoked when Volume Up is pressed (Next Page).
+  /// Invoked when Volume Up is pressed or an upward volume change is observed.
   void onVolumeUp();
 
-  /// Invoked when Volume Down is pressed (Previous Page).
+  /// Invoked when Volume Down is pressed or a downward volume change is observed.
   void onVolumeDown();
 }
 
-/// Shared manager that coordinates Android hardware volume-key events across
-/// active readers.
+/// Shared manager that coordinates volume-key navigation across active readers.
 ///
-/// Hardware volume keys are only intercepted on Android when at least one
-/// reader has opted in via `useVolumeKeys: true`. When no active reader is
-/// listening, or on non-Android platforms, no platform channel listener is
-/// active and Android system volume remains unaffected.
+/// Android intercepts hardware volume key events while an opted-in reader is
+/// active. On iOS, the native plugin observes changes to AVAudioSession's
+/// system output volume and infers the direction; it does not intercept the
+/// key-down event or suppress normal system volume behavior. On iOS, changes
+/// from Control Center or connected devices can also be observed, and there is
+/// no change event when the volume is already at a limit. Other platforms do
+/// not provide volume-key navigation through this manager.
 ///
-/// When multiple readers exist in the widget tree or navigation stack,
-/// events are deterministically routed to the topmost (most recently registered)
-/// active client.
+/// When multiple readers exist in the widget tree or navigation stack, events
+/// are routed to the topmost (most recently registered) active client.
 class VolumeKeyManager {
   VolumeKeyManager._();
 
@@ -61,8 +62,8 @@ class VolumeKeyManager {
 
   /// Unregisters [client] from receiving volume key events.
   ///
-  /// If no clients remain, the underlying platform channel stream is canceled,
-  /// causing Android native code to restore default system volume handling.
+  /// If no clients remain, the platform stream is canceled and native
+  /// observation/interception is stopped.
   void unregisterClient(VolumeKeyClient client) {
     _clients.remove(client);
     _syncSubscription();
@@ -70,28 +71,46 @@ class VolumeKeyManager {
 
   void _syncSubscription() {
     final platform = debugPlatformOverride ?? defaultTargetPlatform;
-    final shouldListen =
-        _clients.isNotEmpty && platform == TargetPlatform.android;
+    final supportsVolumeEvents =
+        !kIsWeb &&
+        (platform == TargetPlatform.android || platform == TargetPlatform.iOS);
+    final shouldListen = _clients.isNotEmpty && supportsVolumeEvents;
 
     if (shouldListen && _subscription == null) {
+      debugPrint(
+        '[Paperflip Dart] VolumeKeyManager: subscribing to EventChannel',
+      );
       _subscription = _channel.receiveBroadcastStream().listen(
         _handleEvent,
         onError: (Object error) {
-          // Swallow or handle stream errors safely
+          // Channel setup may fail on a host app that has not registered the
+          // plugin correctly. The reader should remain usable without keys.
+          debugPrint(
+            '[Paperflip Dart] Paperflip volume-key stream failed: $error',
+          );
         },
       );
     } else if (!shouldListen && _subscription != null) {
+      debugPrint('[Paperflip Dart] VolumeKeyManager: canceling subscription');
       _subscription?.cancel();
       _subscription = null;
     }
   }
 
   void _handleEvent(dynamic event) {
-    if (_clients.isEmpty) return;
+    debugPrint('[Paperflip Dart] VolumeKeyManager received event: $event');
+    if (_clients.isEmpty) {
+      debugPrint(
+        '[Paperflip Dart] VolumeKeyManager: no active clients to receive event',
+      );
+      return;
+    }
     final active = _clients.last;
     if (event == 'up') {
+      debugPrint('[Paperflip Dart] dispatching onVolumeUp to active client');
       active.onVolumeUp();
     } else if (event == 'down') {
+      debugPrint('[Paperflip Dart] dispatching onVolumeDown to active client');
       active.onVolumeDown();
     }
   }

@@ -12,6 +12,8 @@ dependencies:
   epub_plus: ^5.1.0
   flutter:
     sdk: flutter
+  flutter_web_plugins:
+    sdk: flutter
   flutter_widget_from_html_core: ^0.17.4
   html: ^0.15.4
   http: ^1.2.0
@@ -23,9 +25,18 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
 
+platforms:
+  android:
+  ios:
+  macos:
+
 flutter:
   plugin:
     platforms:
       android:
         package: io.github.jeryjohn.paperflip
+        pluginClass: PaperflipPlugin
+      ios:
+        pluginClass: PaperflipPlugin
+      macos:
         pluginClass: PaperflipPlugin
