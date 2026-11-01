@@ -1,34 +1,21 @@
 PODS:
   - FlutterMacOS (1.0.0)
-  - paperflip (0.1.0):
-    - FlutterMacOS
-  - pdfium_flutter (0.1.5):
-    - Flutter
-    - FlutterMacOS
-  - url_launcher_macos (0.0.1):
+  - paperflip (0.1.1):
     - FlutterMacOS
 
 DEPENDENCIES:
   - FlutterMacOS (from `Flutter/ephemeral`)
   - paperflip (from `Flutter/ephemeral/.symlinks/plugins/paperflip/macos`)
-  - pdfium_flutter (from `Flutter/ephemeral/.symlinks/plugins/pdfium_flutter/darwin`)
-  - url_launcher_macos (from `Flutter/ephemeral/.symlinks/plugins/url_launcher_macos/macos`)
 
 EXTERNAL SOURCES:
   FlutterMacOS:
     :path: Flutter/ephemeral
   paperflip:
     :path: Flutter/ephemeral/.symlinks/plugins/paperflip/macos
-  pdfium_flutter:
-    :path: Flutter/ephemeral/.symlinks/plugins/pdfium_flutter/darwin
-  url_launcher_macos:
-    :path: Flutter/ephemeral/.symlinks/plugins/url_launcher_macos/macos
 
 SPEC CHECKSUMS:
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
-  paperflip: 29835172144a69427b8c272af878901089640e19
-  pdfium_flutter: e5a6e881af0b182d5b0465ebad23a8a20caa28d4
-  url_launcher_macos: f87a979182d112f911de6820aefddaf56ee9fbfd
+  paperflip: 2501a5fdf4cda30119a6a80e0185409350378f56
 
 PODFILE CHECKSUM: 54d867c82ac51cbd61b565781b9fada492027009
 

@@ -1,7 +1,7 @@
 name: paperflip_example
 description: Example app for the paperflip package.
 publish_to: none
-version: 0.1.0
+version: 0.1.1
 
 environment:
   sdk: '^3.10.0'
