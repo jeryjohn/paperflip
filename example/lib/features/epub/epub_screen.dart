@@ -1,5 +1,6 @@
-import 'package:paperflip/paperflip.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:paperflip/paperflip.dart';
 
 /// The clean, professional EPUB reader detailed page.
 class CommonScreen extends StatefulWidget {
@@ -98,43 +99,46 @@ class _CommonScreenState extends State<CommonScreen> {
                   ),
                   const SizedBox(height: 8),
 
-                  // Volume keys toggle
-                  SwitchListTile(
-                    tileColor: theme.foreground.withValues(alpha: 0.04),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 2,
-                    ),
-                    secondary: Icon(
-                      _useVolumeKeys ? Icons.volume_up : Icons.volume_off,
-                      color: const Color(0xFF2E654D),
-                    ),
-                    title: Text(
-                      'Use volume button',
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: theme.foreground,
+                  // Volume keys toggle (Android-only)
+                  if (!kIsWeb &&
+                      defaultTargetPlatform == TargetPlatform.android) ...[
+                    SwitchListTile(
+                      tileColor: theme.foreground.withValues(alpha: 0.04),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
                       ),
-                    ),
-                    subtitle: Text(
-                      'Turn pages using hardware volume keys',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: theme.foreground.withValues(alpha: 0.6),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 2,
                       ),
+                      secondary: Icon(
+                        _useVolumeKeys ? Icons.volume_up : Icons.volume_off,
+                        color: const Color(0xFF2E654D),
+                      ),
+                      title: Text(
+                        'Use volume button',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          color: theme.foreground,
+                        ),
+                      ),
+                      subtitle: Text(
+                        'Turn pages using hardware volume keys',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: theme.foreground.withValues(alpha: 0.6),
+                        ),
+                      ),
+                      value: _useVolumeKeys,
+                      activeThumbColor: const Color(0xFF2E654D),
+                      onChanged: (val) {
+                        setState(() => _useVolumeKeys = val);
+                        setSheet(() {});
+                      },
                     ),
-                    value: _useVolumeKeys,
-                    activeThumbColor: const Color(0xFF2E654D),
-                    onChanged: (val) {
-                      setState(() => _useVolumeKeys = val);
-                      setSheet(() {});
-                    },
-                  ),
-                  const SizedBox(height: 18),
+                    const SizedBox(height: 18),
+                  ],
 
                   // Color themes
                   Text(

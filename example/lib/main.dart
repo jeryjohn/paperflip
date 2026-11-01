@@ -28,6 +28,7 @@ class PaperFlipDemo extends StatelessWidget {
           brightness: Brightness.light,
         ),
         useMaterial3: true,
+        splashFactory: InkRipple.splashFactory,
         scaffoldBackgroundColor: const Color(0xFFF7F8F7),
         appBarTheme: const AppBarTheme(
           backgroundColor: Colors.white,

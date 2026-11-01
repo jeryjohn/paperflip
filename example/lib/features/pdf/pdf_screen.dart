@@ -1,5 +1,6 @@
-import 'package:paperflip/paperflip.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:paperflip/paperflip.dart';
 
 class PdfScreen extends StatefulWidget {
   const PdfScreen({
@@ -78,16 +79,17 @@ class _PdfScreenState extends State<PdfScreen> {
             icon: const Icon(Icons.bookmark_outline_rounded),
             onPressed: _openJumpToPage,
           ),
-          IconButton(
-            tooltip: _useVolumeKeys
-                ? 'Volume keys enabled'
-                : 'Volume keys disabled',
-            icon: Icon(
-              _useVolumeKeys ? Icons.volume_up : Icons.volume_off,
-              color: _useVolumeKeys ? const Color(0xFFB03A2E) : Colors.grey,
+          if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android)
+            IconButton(
+              tooltip: _useVolumeKeys
+                  ? 'Volume keys enabled'
+                  : 'Volume keys disabled',
+              icon: Icon(
+                _useVolumeKeys ? Icons.volume_up : Icons.volume_off,
+                color: _useVolumeKeys ? const Color(0xFFB03A2E) : Colors.grey,
+              ),
+              onPressed: () => setState(() => _useVolumeKeys = !_useVolumeKeys),
             ),
-            onPressed: () => setState(() => _useVolumeKeys = !_useVolumeKeys),
-          ),
           IconButton(
             key: const Key('pdf_prev_button'),
             tooltip: 'Previous page',

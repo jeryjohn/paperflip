@@ -1,5 +1,6 @@
-import 'package:paperflip/paperflip.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:paperflip/paperflip.dart';
 
 class CustomScreen extends StatefulWidget {
   const CustomScreen({super.key});
@@ -39,16 +40,17 @@ class _CustomScreenState extends State<CustomScreen> {
       appBar: AppBar(
         title: const Text('Custom Widgets Demo'),
         actions: [
-          IconButton(
-            tooltip: _useVolumeKeys
-                ? 'Volume keys enabled'
-                : 'Volume keys disabled',
-            icon: Icon(
-              _useVolumeKeys ? Icons.volume_up : Icons.volume_off,
-              color: _useVolumeKeys ? const Color(0xFF2E658C) : Colors.grey,
+          if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android)
+            IconButton(
+              tooltip: _useVolumeKeys
+                  ? 'Volume keys enabled'
+                  : 'Volume keys disabled',
+              icon: Icon(
+                _useVolumeKeys ? Icons.volume_up : Icons.volume_off,
+                color: _useVolumeKeys ? const Color(0xFF2E658C) : Colors.grey,
+              ),
+              onPressed: () => setState(() => _useVolumeKeys = !_useVolumeKeys),
             ),
-            onPressed: () => setState(() => _useVolumeKeys = !_useVolumeKeys),
-          ),
           IconButton(
             key: const Key('custom_toggle_curl'),
             tooltip: _curlEnabled ? 'Disable 3D Curl' : 'Enable 3D Curl',

@@ -1,6 +1,7 @@
-import 'package:paperflip_example/main.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:paperflip_example/main.dart';
 
 void main() {
   group('PaperFlip Example App Tests', () {
@@ -128,5 +129,169 @@ void main() {
         await tester.pumpAndSettle();
       },
     );
+
+    group('Volume Button Platform Visibility', () {
+      testWidgets(
+        'CommonScreen (EPUB) shows volume button toggle and explanatory text on Android',
+        (tester) async {
+          try {
+            debugDefaultTargetPlatformOverride = TargetPlatform.android;
+
+            await tester.pumpWidget(
+              const PaperFlipDemo(initialScreen: CommonScreen()),
+            );
+            await tester.pumpAndSettle();
+
+            // Open settings modal
+            await tester.tap(find.byKey(const Key('common_settings_button')));
+            await tester.pumpAndSettle();
+
+            // Volume keys option and explanatory text must be visible on Android
+            expect(find.text('Use volume button'), findsOneWidget);
+            expect(
+              find.text('Turn pages using hardware volume keys'),
+              findsOneWidget,
+            );
+
+            // Verify toggle interaction
+            final switchTile = find.widgetWithText(
+              SwitchListTile,
+              'Use volume button',
+            );
+            expect(switchTile, findsOneWidget);
+            expect(tester.widget<SwitchListTile>(switchTile).value, isFalse);
+
+            await tester.tap(switchTile);
+            await tester.pumpAndSettle();
+
+            expect(tester.widget<SwitchListTile>(switchTile).value, isTrue);
+          } finally {
+            debugDefaultTargetPlatformOverride = null;
+          }
+        },
+      );
+
+      for (final platform in [
+        TargetPlatform.iOS,
+        TargetPlatform.macOS,
+        TargetPlatform.windows,
+        TargetPlatform.linux,
+      ]) {
+        testWidgets(
+          'CommonScreen (EPUB) hides volume button option on ${platform.name}',
+          (tester) async {
+            try {
+              debugDefaultTargetPlatformOverride = platform;
+
+              await tester.pumpWidget(
+                const PaperFlipDemo(initialScreen: CommonScreen()),
+              );
+              await tester.pumpAndSettle();
+
+              // Open settings modal
+              await tester.tap(find.byKey(const Key('common_settings_button')));
+              await tester.pumpAndSettle();
+
+              // Volume keys option and explanatory text must be hidden on non-Android platforms
+              expect(find.text('Use volume button'), findsNothing);
+              expect(
+                find.text('Turn pages using hardware volume keys'),
+                findsNothing,
+              );
+            } finally {
+              debugDefaultTargetPlatformOverride = null;
+            }
+          },
+        );
+      }
+
+      testWidgets(
+        'CustomScreen shows volume action on Android and toggles state',
+        (tester) async {
+          try {
+            debugDefaultTargetPlatformOverride = TargetPlatform.android;
+
+            await tester.pumpWidget(
+              const PaperFlipDemo(initialScreen: CustomScreen()),
+            );
+            await tester.pumpAndSettle();
+
+            expect(find.byTooltip('Volume keys disabled'), findsOneWidget);
+            await tester.tap(find.byTooltip('Volume keys disabled'));
+            await tester.pumpAndSettle();
+            expect(find.byTooltip('Volume keys enabled'), findsOneWidget);
+          } finally {
+            debugDefaultTargetPlatformOverride = null;
+          }
+        },
+      );
+
+      for (final platform in [
+        TargetPlatform.iOS,
+        TargetPlatform.macOS,
+        TargetPlatform.windows,
+        TargetPlatform.linux,
+      ]) {
+        testWidgets('CustomScreen hides volume action on ${platform.name}', (
+          tester,
+        ) async {
+          try {
+            debugDefaultTargetPlatformOverride = platform;
+
+            await tester.pumpWidget(
+              const PaperFlipDemo(initialScreen: CustomScreen()),
+            );
+            await tester.pumpAndSettle();
+
+            expect(find.byTooltip('Volume keys disabled'), findsNothing);
+            expect(find.byTooltip('Volume keys enabled'), findsNothing);
+          } finally {
+            debugDefaultTargetPlatformOverride = null;
+          }
+        });
+      }
+
+      testWidgets('PdfScreen shows volume action on Android', (tester) async {
+        try {
+          debugDefaultTargetPlatformOverride = TargetPlatform.android;
+
+          await tester.pumpWidget(
+            const PaperFlipDemo(initialScreen: PdfScreen()),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 200));
+
+          expect(find.byTooltip('Volume keys disabled'), findsOneWidget);
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      });
+
+      for (final platform in [
+        TargetPlatform.iOS,
+        TargetPlatform.macOS,
+        TargetPlatform.windows,
+        TargetPlatform.linux,
+      ]) {
+        testWidgets('PdfScreen hides volume action on ${platform.name}', (
+          tester,
+        ) async {
+          try {
+            debugDefaultTargetPlatformOverride = platform;
+
+            await tester.pumpWidget(
+              const PaperFlipDemo(initialScreen: PdfScreen()),
+            );
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 200));
+
+            expect(find.byTooltip('Volume keys disabled'), findsNothing);
+            expect(find.byTooltip('Volume keys enabled'), findsNothing);
+          } finally {
+            debugDefaultTargetPlatformOverride = null;
+          }
+        });
+      }
+    });
   });
 }
