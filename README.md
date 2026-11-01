@@ -32,7 +32,7 @@ Or add it manually to `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  paperflip: ^0.1.0
+  paperflip: ^0.1.1
 ```
 
 Then fetch dependencies:

@@ -1,6 +1,6 @@
 name: paperflip
 description: Realistic book page-flip reader with 3D drag-to-curl mesh animation, programmatic control, and full EPUB, PDF, and custom widget support.
-version: 0.1.0
+version: 0.1.1
 homepage: https://github.com/jeryjohn/paperflip
 repository: https://github.com/jeryjohn/paperflip
 

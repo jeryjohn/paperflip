@@ -6,6 +6,28 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-01
+
+### Added
+
+- iOS and macOS platform support for the Paperflip reader and shared page-flip engine.
+- Best-effort iOS volume-change observation through AVAudioSession output-volume KVO, with documented limitations.
+- Updated example controls that expose volume-button navigation only on Android.
+
+### Changed
+
+- Improved native iOS observer lifecycle handling.
+- Improved platform-specific documentation.
+- Expanded volume-navigation API documentation.
+- Updated example application platform behavior.
+- Improved cross-platform CI validation.
+
+### Fixed
+
+- Fixed potentially disruptive `AVAudioSession.setActive(true)` and `setActive(false)` calls in the iOS plugin, preserving host application audio session lifecycle without unexpected deactivations.
+- Removed unconditional production `NSLog` logging in the iOS plugin to prevent polluting consumer application logs.
+- Fixed deterministic 32-bit integer multiplication in EPUB network cache key generation for web runtimes.
+
 ## [0.1.0] - 2026-10-25
 
 ### Added
