@@ -236,6 +236,7 @@ class PageCurlGeometry {
     required double sinPhi,
     required double originY,
   }) {
+    mesh.cornerFoldFrame = null;
     final world = mesh.worldPositions;
 
     for (var row = 0; row <= rows; row++) {
@@ -270,6 +271,7 @@ class PageCurlGeometry {
   /// the cone curl. Only the crease direction differs: it can cut diagonally
   /// across the page, which is what a corner pull looks like.
   void _deformCornerFold(PageCurlMesh mesh, CornerFoldFrame f) {
+    mesh.cornerFoldFrame = f;
     final world = mesh.worldPositions;
     final cols = mesh.columns;
     final rows = mesh.rows;
@@ -326,6 +328,7 @@ class PageCurlGeometry {
     required double sagAmp,
     required double grabV,
   }) {
+    mesh.cornerFoldFrame = null;
     final world = mesh.worldPositions;
     final halfH = h * 0.5;
 
@@ -399,12 +402,18 @@ class PageCurlGeometry {
     }
   }
 
-  /// Computes per-vertex normals from the deformed surface by central
-  /// differences across the grid.
+  /// Computes per-vertex normals from the deformed surface.
   ///
-  /// Degenerate differences fall back to a stable page normal rather than
-  /// emitting NaN values.
+  /// For corner folds, uses exact analytic normals derived from the developable
+  /// cylinder equations to eliminate central-difference error and crease artifacts.
+  /// For spine curls, uses central differences across the grid.
   void computeNormals(PageCurlMesh mesh) {
+    final frame = mesh.cornerFoldFrame;
+    if (frame is CornerFoldFrame) {
+      _computeCornerFoldNormals(mesh, frame);
+      return;
+    }
+
     final cols = mesh.columns;
     final rows = mesh.rows;
     final world = mesh.worldPositions;
@@ -447,6 +456,47 @@ class PageCurlGeometry {
         normals[i * 3] = nx;
         normals[i * 3 + 1] = ny;
         normals[i * 3 + 2] = nz;
+      }
+    }
+  }
+
+  /// Evaluates exact analytic normals for a corner fold cylinder without
+  /// central-difference errors or polygon faceting.
+  void _computeCornerFoldNormals(PageCurlMesh mesh, CornerFoldFrame f) {
+    final cols = mesh.columns;
+    final rows = mesh.rows;
+    final h = mesh.pageSize.height;
+    final r = f.radius;
+    final arc = math.pi * r;
+    final normals = mesh.normals;
+
+    for (var row = 0; row <= rows; row++) {
+      final y = (row / rows) * h;
+      for (var col = 0; col <= cols; col++) {
+        final x = (col / cols) * f.leafWidth;
+        final s = (x - f.axisX) * f.mx + (y - f.axisY) * f.my;
+        final i = row * (cols + 1) + col;
+
+        if (s <= 0 || r <= 1e-9) {
+          // Flat sheet resting on the book.
+          normals[i * 3] = 0.0;
+          normals[i * 3 + 1] = 0.0;
+          normals[i * 3 + 2] = -1.0;
+        } else if (s >= arc) {
+          // Folded flap facing opposite.
+          normals[i * 3] = 0.0;
+          normals[i * 3 + 1] = 0.0;
+          normals[i * 3 + 2] = 1.0;
+        } else {
+          // Cylinder roll: analytic developable normal.
+          final theta = s / r;
+          final sinTheta = math.sin(theta);
+          final cosTheta = math.cos(theta);
+
+          normals[i * 3] = f.dir * f.mx * sinTheta;
+          normals[i * 3 + 1] = f.my * sinTheta;
+          normals[i * 3 + 2] = -cosTheta;
+        }
       }
     }
   }

@@ -90,11 +90,9 @@ class PageCurlMesh {
     return PageCurlMesh(columns: columns, rows: rows, pageSize: pageSize);
   }
 
-  /// Starting point for the column sweep, not a researched optimum.
-  ///
-  /// The renderer should benchmark alternative values on the target devices
-  /// before changing this default.
-  static const int defaultColumns = 32;
+  /// Higher density provides smooth, continuous deformation across small curl
+  /// radii without visible polygonal faceting.
+  static const int defaultColumns = 48;
 
   static const int _maxIndexValue = 0xFFFF;
 
@@ -160,6 +158,10 @@ class PageCurlMesh {
   /// allocating. The current renderer maintains its own submission buffer, but
   /// this remains part of the mesh's reusable scratch storage.
   late final Uint16List orderedIndices;
+
+  /// Retains the corner fold geometry frame when deformed into a corner peel,
+  /// allowing exact analytic normal evaluation without central-difference error.
+  Object? cornerFoldFrame;
 
   void _buildTopology() {
     final vertexColumns = columns + 1;
@@ -265,6 +267,7 @@ class PageCurlMesh {
   /// zero. Keeping this operation explicit also gives tests a deterministic
   /// reference state for the first frame and for renderer hand-off.
   void resetToFlat({Offset origin = Offset.zero}) {
+    cornerFoldFrame = null;
     for (var vertex = 0; vertex < vertexCount; vertex++) {
       final x = origin.dx + normalized[vertex * 2] * pageSize.width;
       final y = origin.dy + normalized[vertex * 2 + 1] * pageSize.height;

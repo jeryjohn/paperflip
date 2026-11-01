@@ -39,7 +39,7 @@ class PageCurlRenderer {
   ui.Image? _shaderImage;
 
   final Paint _paint = Paint()
-    ..isAntiAlias = true
+    ..isAntiAlias = false
     ..filterQuality = FilterQuality.medium;
 
   /// Reusable index buffer holding triangles in draw order.
@@ -152,9 +152,56 @@ class PageCurlRenderer {
     // previous frame alive is unnecessary native memory.
     canvas.drawVertices(vertices, BlendMode.modulate, _paint);
 
+    // Subtle physical rim along the sheet's outer perimeter for realistic
+    // page thickness and anti-aliased edge continuity.
+    _paintPaperEdge(canvas, mesh, params);
+
     _vertices?.dispose();
     _vertices = vertices;
     return true;
+  }
+
+  /// Traces and softly outlines the perimeter of the turning sheet, giving it
+  /// subtle paper thickness and smooth anti-aliased silhouette edges.
+  void _paintPaperEdge(
+    Canvas canvas,
+    PageCurlMesh mesh,
+    CurlParameters params,
+  ) {
+    if (params.isFlat || mesh.columns < 1 || mesh.rows < 1) return;
+
+    final pos = mesh.positions;
+    final rimPath = Path();
+
+    // Top edge from spine to free edge
+    for (var c = 0; c <= mesh.columns; c++) {
+      final i = mesh.vertexIndex(c, 0);
+      final x = pos[i * 2];
+      final y = pos[i * 2 + 1];
+      if (c == 0) {
+        rimPath.moveTo(x, y);
+      } else {
+        rimPath.lineTo(x, y);
+      }
+    }
+    // Free edge from top to bottom
+    for (var r = 1; r <= mesh.rows; r++) {
+      final i = mesh.vertexIndex(mesh.columns, r);
+      rimPath.lineTo(pos[i * 2], pos[i * 2 + 1]);
+    }
+    // Bottom edge from free edge back to spine
+    for (var c = mesh.columns - 1; c >= 0; c--) {
+      final i = mesh.vertexIndex(c, mesh.rows);
+      rimPath.lineTo(pos[i * 2], pos[i * 2 + 1]);
+    }
+
+    final rimPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.65
+      ..color = const Color(0x1F000000)
+      ..isAntiAlias = true;
+
+    canvas.drawPath(rimPath, rimPaint);
   }
 
   /// Points every vertex at the appropriate sheet-face region.
@@ -312,9 +359,10 @@ class PageCurlRenderer {
 
     if (!_isValidRegion(atlas.image, region)) return false;
 
-    // Inset by half a texel. Bilinear sampling at the cell edge can otherwise
-    // pull neighbouring pixels across the two-face atlas gutter.
-    final inset = region.deflate(0.5);
+    // Bilinear sampling at the cell edge can otherwise pull neighbouring pixels
+    // across the two-face atlas gutter. In a single-face atlas no gutter exists,
+    // so avoid insetting to keep texels pixel-aligned on flat pages.
+    final inset = atlas.isSingleFace ? region : region.deflate(0.5);
     if (inset.width <= 0 || inset.height <= 0) return false;
 
     final mirrorHorizontally = resolveMirrorHorizontally(
@@ -492,7 +540,7 @@ class PageCurlRenderer {
 @immutable
 @internal
 class PageCurlLighting {
-  const PageCurlLighting({this.ambient = 0.30, this.foldDarkening = 0.22})
+  const PageCurlLighting({this.ambient = 0.72, this.foldDarkening = 0.04})
     : assert(ambient >= 0 && ambient <= 1),
       assert(foldDarkening >= 0);
 
@@ -521,7 +569,10 @@ class PageCurlLighting {
       final facing = nz.abs().clamp(0.0, 1.0);
       final curl = 1.0 - facing;
 
-      var luminance = ambient + (1.0 - ambient) * facing;
+      // Smooth diffuse paper lighting: preserves clean off-white book paper
+      // while providing gentle, natural 3D curvature shading without dark creases.
+      final diffuse = math.pow(facing, 0.7).toDouble();
+      var luminance = ambient + (1.0 - ambient) * diffuse;
       luminance -= foldDarkening * curl * curl;
 
       final level = (luminance.clamp(0.0, 1.0) * 255).round();
@@ -611,9 +662,8 @@ class PageCurlShadow {
 
   /// Soft shadow the roll casts onto the revealed page, along the crease.
   ///
-  /// The roll's silhouette reaches `R` past the crease line; the shadow starts
-  /// there and fades out over a short band. Everything on the other side is
-  /// under the sheet and hidden anyway.
+  /// Uses a smooth multi-stop gradient falloff and contact ambient occlusion
+  /// to eliminate sharp geometric edges and provide natural paper depth.
   void _paintCornerShadow(
     Canvas canvas,
     Size pageSize,
@@ -635,40 +685,83 @@ class PageCurlShadow {
     final ny = f.my;
     final sx = f.spineX + f.dir * (f.axisX + f.mx * f.radius);
     final sy = f.axisY + f.my * f.radius;
-    final width = f.leafWidth * 0.08 + f.radius * 0.6;
+    final width = f.leafWidth * 0.10 + f.radius * 0.8;
 
     final start = origin + Offset(sx, sy);
     final end = start + Offset(nx * width, ny * width);
     final alpha = opacity * envelope;
 
-    // Half-plane on the revealed side of the start line, clipped to the page.
     final page = origin & pageSize;
     final big = pageSize.longestSide * 4;
     final tangent = Offset(-ny, nx);
     final normal = Offset(nx, ny);
+
+    // Easing the start of the gradient smoothly from under the fold prevents
+    // a harsh razor line at the roll apex boundary.
+    final inset = width * 0.25;
+    final gradStart = start - normal * inset;
+    final gradEnd = end;
+
     final band = Path()
-      ..moveTo(start.dx + tangent.dx * big, start.dy + tangent.dy * big)
-      ..lineTo(start.dx - tangent.dx * big, start.dy - tangent.dy * big)
-      ..lineTo(
-        start.dx - tangent.dx * big + normal.dx * big,
-        start.dy - tangent.dy * big + normal.dy * big,
-      )
-      ..lineTo(
-        start.dx + tangent.dx * big + normal.dx * big,
-        start.dy + tangent.dy * big + normal.dy * big,
-      )
+      ..moveTo(gradStart.dx + tangent.dx * big, gradStart.dy + tangent.dy * big)
+      ..lineTo(gradStart.dx - tangent.dx * big, gradStart.dy - tangent.dy * big)
+      ..lineTo(gradEnd.dx - tangent.dx * big, gradEnd.dy - tangent.dy * big)
+      ..lineTo(gradEnd.dx + tangent.dx * big, gradEnd.dy + tangent.dy * big)
       ..close();
 
     final paint = Paint()
-      ..shader = ui.Gradient.linear(start, end, [
-        Color.fromRGBO(0, 0, 0, alpha),
-        const Color(0x00000000),
-      ]);
+      ..shader = ui.Gradient.linear(
+        gradStart,
+        gradEnd,
+        [
+          const Color(0x00000000),
+          Color.fromRGBO(0, 0, 0, alpha * 0.85),
+          Color.fromRGBO(0, 0, 0, alpha * 0.38),
+          Color.fromRGBO(0, 0, 0, alpha * 0.10),
+          const Color(0x00000000),
+        ],
+        [0.0, 0.24, 0.52, 0.78, 1.0],
+      );
+
+    // Subtle contact ambient occlusion along the crease line:
+    final creaseStart = origin + Offset(f.spineX + f.dir * f.axisX, f.axisY);
+    final aoWidth = (f.radius * 0.28).clamp(2.0, 10.0);
+    final aoPaint = Paint()
+      ..shader = ui.Gradient.linear(
+        creaseStart - normal * (aoWidth * 0.5),
+        creaseStart + normal * (aoWidth * 0.5),
+        [
+          const Color(0x00000000),
+          Color.fromRGBO(0, 0, 0, alpha * 0.40),
+          const Color(0x00000000),
+        ],
+        [0.0, 0.5, 1.0],
+      );
+
+    final aoBand = Path()
+      ..moveTo(
+        creaseStart.dx + tangent.dx * big - normal.dx * (aoWidth * 0.5),
+        creaseStart.dy + tangent.dy * big - normal.dy * (aoWidth * 0.5),
+      )
+      ..lineTo(
+        creaseStart.dx - tangent.dx * big - normal.dx * (aoWidth * 0.5),
+        creaseStart.dy - tangent.dy * big - normal.dy * (aoWidth * 0.5),
+      )
+      ..lineTo(
+        creaseStart.dx - tangent.dx * big + normal.dx * (aoWidth * 0.5),
+        creaseStart.dy - tangent.dy * big + normal.dy * (aoWidth * 0.5),
+      )
+      ..lineTo(
+        creaseStart.dx + tangent.dx * big + normal.dx * (aoWidth * 0.5),
+        creaseStart.dy + tangent.dy * big + normal.dy * (aoWidth * 0.5),
+      )
+      ..close();
 
     canvas
       ..save()
       ..clipRect(page)
       ..drawPath(band, paint)
+      ..drawPath(aoBand, aoPaint)
       ..restore();
   }
 
