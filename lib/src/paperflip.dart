@@ -149,10 +149,18 @@ class PaperFlip extends StatelessWidget {
   /// Reports the page count once a PDF has opened.
   final void Function(int pageCount)? onPageCountAvailable;
 
-  /// Whether volume changes should navigate pages on supported devices.
-  /// Android intercepts volume-key events; iOS infers direction from system
-  /// output-volume changes without suppressing normal system volume behavior.
-  /// Other platforms do not provide volume-key navigation.
+  /// Enables volume-based page navigation on supported platforms.
+  ///
+  /// Android intercepts volume-key events while the reader is active, turning
+  /// pages without changing system volume.
+  /// iOS observes `AVAudioSession.outputVolume` changes to infer direction, so
+  /// the system volume also changes when these buttons are pressed. This is
+  /// best-effort: other system volume changes may navigate pages, and no event
+  /// is detected when the volume cannot change at its minimum or maximum.
+  /// Other unsupported platforms do not provide volume-key navigation through
+  /// this API.
+  ///
+  /// Defaults to `false`.
   final bool useVolumeKeys;
 
   @override

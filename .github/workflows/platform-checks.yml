@@ -1,0 +1,131 @@
+name: Platform checks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-checks:
+    name: Format, analyze, and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+      - name: Get dependencies
+        run: flutter pub get
+      - name: Check formatting
+        run: dart format --output=none --set-exit-if-changed lib test
+      - name: Analyze
+        run: flutter analyze
+      - name: Fetch public-domain EPUB fixtures
+        run: bash tool/fetch_books.sh
+      - name: Test package
+        run: flutter test
+
+  build-web:
+    name: Build Web example
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+      - name: Get example dependencies
+        working-directory: example
+        run: flutter pub get
+      - name: Build Web
+        working-directory: example
+        run: flutter build web --release
+
+  build-linux:
+    name: Build Linux example
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+      - name: Enable Linux desktop
+        run: flutter config --enable-linux-desktop
+      - name: Generate Linux example runner
+        working-directory: example
+        run: flutter create --platforms=linux .
+      - name: Get example dependencies
+        working-directory: example
+        run: flutter pub get
+      - name: Build Linux
+        working-directory: example
+        run: flutter build linux --release
+
+  build-windows:
+    name: Build Windows example
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Enable Windows symbolic links
+        shell: pwsh
+        run: |
+          New-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Force | Out-Null
+          New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Name 'AllowDevelopmentWithoutDevLicense' -Value 1 -PropertyType DWord -Force | Out-Null
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+      - name: Generate Windows example runner
+        working-directory: example
+        run: flutter create --platforms=windows .
+      - name: Get example dependencies
+        working-directory: example
+        run: flutter pub get
+      - name: Build Windows
+        working-directory: example
+        run: flutter build windows --release
+
+  build-darwin:
+    name: Build iOS and macOS examples
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+      - name: Generate iOS and macOS example runners
+        working-directory: example
+        run: flutter create --platforms=ios,macos .
+      - name: Get example dependencies
+        working-directory: example
+        run: flutter pub get
+      - name: Build iOS
+        working-directory: example
+        run: flutter build ios --no-codesign
+      - name: Build macOS
+        working-directory: example
+        run: flutter build macos --release

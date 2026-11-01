@@ -14,13 +14,19 @@ abstract interface class VolumeKeyClient {
 
 /// Shared manager that coordinates volume-key navigation across active readers.
 ///
-/// Android intercepts hardware volume key events while an opted-in reader is
-/// active. On iOS, the native plugin observes changes to AVAudioSession's
-/// system output volume and infers the direction; it does not intercept the
-/// key-down event or suppress normal system volume behavior. On iOS, changes
-/// from Control Center or connected devices can also be observed, and there is
-/// no change event when the volume is already at a limit. Other platforms do
-/// not provide volume-key navigation through this manager.
+/// Android intercepts hardware volume-key events while an opted-in reader is
+/// active, turning pages without changing system volume.
+///
+/// On iOS, the native plugin observes changes to AVAudioSession's system output
+/// volume and infers the direction; it does not intercept the key-down event or
+/// suppress normal system volume behavior. Page navigation works, but system
+/// volume also changes when buttons are pressed. On iOS, this is best-effort:
+/// changes from Control Center or connected devices can also trigger navigation,
+/// and no event is detected when the volume cannot change at its minimum or
+/// maximum limits.
+///
+/// Other unsupported platforms do not provide volume-key navigation through
+/// this manager.
 ///
 /// When multiple readers exist in the widget tree or navigation stack, events
 /// are routed to the topmost (most recently registered) active client.

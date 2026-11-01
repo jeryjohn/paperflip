@@ -249,24 +249,40 @@ The exact dependency versions are declared in `pubspec.yaml`.
 
 ## Platform support
 
-Paperflip officially supports **Android, iOS, and macOS**.
+Paperflip officially supports **Android, iOS, and macOS**. Hardware volume navigation is disabled by default (`useVolumeKeys: false`) and must be explicitly enabled per reader.
 
-| Platform | Core Reader & Flip Engine | Hardware Volume Navigation (`useVolumeKeys: true`) | Status |
+| Platform | Core Reader & Flip Engine | Hardware Volume Navigation (`useVolumeKeys: true`, disabled by default) | Status |
 | :--- | :--- | :--- | :--- |
 | **Android** | Supported | Supported (hardware key-event interception) | Verified |
-| **iOS** | Supported | Best-effort (`AVAudioSession.outputVolume` KVO) | Reader verified; volume keys unverified on hardware |
+| **iOS** | Supported | Best-effort (`AVAudioSession.outputVolume` KVO) | Reader verified; volume keys best-effort & unverified on physical hardware |
 | **macOS** | Supported | Not supported (no native volume-key listener) | Verified |
 
 ### Hardware volume navigation
 
-Hardware volume navigation is opt-in via `useVolumeKeys: true` (default is `false` across all reader widgets and example screens):
+Volume-based page navigation is disabled by default across all reader widgets and example screens, and must be explicitly enabled with `useVolumeKeys: true`:
 
-- **Android:** The native plugin intercepts volume-key events while an opted-in reader is active. Key presses navigate pages without altering system volume during reading.
-- **iOS:** Paperflip observes `AVAudioSession.outputVolume` changes via KVO and infers direction. It does not intercept raw hardware key-down events or suppress system volume HUD behavior. No event can be detected when volume is already at its minimum (0%) or maximum (100%). Plugin registration, channel subscription, and audio-session lifecycle are verified in simulator builds, but physical button navigation remains unverified until tested on a physical iPhone.
-- **macOS:** Reader widgets and controllers are fully functional, but volume-key navigation is unsupported.
+```dart
+PaperFlip.epub(
+  source: EpubSource.asset('assets/books/sample.epub'),
+  useVolumeKeys: true,
+)
+```
+
+**Important iOS behavior and limitations:**
+Volume navigation on iOS must be a deliberate choice by the consuming application because pressing volume buttons changes both the page and system volume. Unlike Android, iOS does not provide native hardware volume-key interception:
+- **No button interception:** iOS does not allow raw hardware key interception or suppressing normal system volume behavior. System volume changes remain enabled.
+- **Direction inferred from output volume:** Paperflip observes `AVAudioSession.outputVolume` changes via KVO and infers the navigation direction from volume differences.
+- **Best-effort, not guaranteed detection:** This mechanism is strictly best-effort, not guaranteed raw hardware-button detection. Other system volume changes (such as from Control Center or external accessories) may trigger page navigation, and button presses cannot produce an event when volume is already at its minimum (0%) or maximum (100%).
+- **Physical-device verification:** Plugin registration, event-channel subscription, and audio-session lifecycle are verified in simulator builds, but iOS hardware behavior remains subject to physical-device verification until tested on a physical device.
+
+Apple documents observing `AVAudioSession.outputVolume` via KVO, but App Review Guideline 2.5.9 warns against altering standard volume-button behavior. Paperflip never resets or manipulates system volume to simulate interception; system volume remains functional as designed by iOS.
+
+#### Platform summary
+
+- **Android:** Intercepts hardware volume keys while an opted-in reader is active. Volume button presses turn pages without altering system volume during reading.
+- **iOS:** Does not provide key interception. System volume changes remain enabled, and Paperflip infers direction from `AVAudioSession.outputVolume` changes on a best-effort basis.
+- **macOS:** Reader widgets and flip animations are fully functional, but volume-key navigation is unsupported.
 - **Windows, Linux, and Web:** Not currently included in the official platform support matrix for this release.
-
-Apple documents observing `AVAudioSession.outputVolume` via KVO, but App Review Guideline 2.5.9 warns against altering standard volume-button behavior. The iOS implementation leaves system volume functional and operates strictly on a best-effort basis rather than a guaranteed hardware-button event API.
 
 ## Testing and analysis
 Run these commands from the package root:

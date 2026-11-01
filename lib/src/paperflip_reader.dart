@@ -104,7 +104,18 @@ class PaperFlipReader extends StatefulWidget {
   /// Maps an error to a message string. Falls back to a generic message.
   final String Function(Object error)? errorMessageBuilder;
 
-  /// Whether physical volume buttons navigate pages on supported devices (Android).
+  /// Enables volume-based page navigation on supported platforms.
+  ///
+  /// Android intercepts volume-key events while the reader is active, turning
+  /// pages without changing system volume.
+  /// iOS observes `AVAudioSession.outputVolume` changes to infer direction, so
+  /// the system volume also changes when these buttons are pressed. This is
+  /// best-effort: other system volume changes may navigate pages, and no event
+  /// is detected when the volume cannot change at its minimum or maximum.
+  /// Other unsupported platforms do not provide volume-key navigation through
+  /// this API.
+  ///
+  /// Defaults to `false`.
   final bool useVolumeKeys;
 
   @override

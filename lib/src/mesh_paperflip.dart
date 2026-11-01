@@ -109,10 +109,17 @@ class MeshPaperFlip extends StatefulWidget {
   /// can remain the same function while the document it renders changes.
   final int contentVersion;
 
-  /// Whether physical volume buttons navigate pages on supported devices (Android).
+  /// Enables volume-based page navigation on supported platforms.
   ///
-  /// When `true`, Volume Up flips to the next page and Volume Down flips to
-  /// the previous page using the physical curl animation.
+  /// Android intercepts volume-key events while the reader is active, turning
+  /// pages without changing system volume.
+  /// iOS observes `AVAudioSession.outputVolume` changes to infer direction, so
+  /// the system volume also changes when these buttons are pressed. This is
+  /// best-effort: other system volume changes may navigate pages, and no event
+  /// is detected when the volume cannot change at its minimum or maximum.
+  /// Other unsupported platforms do not provide volume-key navigation through
+  /// this API.
+  ///
   /// Defaults to `false`.
   final bool useVolumeKeys;
 
