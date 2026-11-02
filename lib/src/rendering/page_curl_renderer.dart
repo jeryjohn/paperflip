@@ -40,7 +40,7 @@ class PageCurlRenderer {
 
   final Paint _paint = Paint()
     ..isAntiAlias = false
-    ..filterQuality = FilterQuality.medium;
+    ..filterQuality = FilterQuality.low;
 
   /// Reusable index buffer holding triangles in draw order.
   Uint16List? _orderedIndices;
@@ -250,8 +250,8 @@ class PageCurlRenderer {
     if (atlas.isDisposed) return null;
     final n = mesh.vertexCount;
 
-    final front = atlas.frontRegion.deflate(0.5);
-    final back = atlas.backRegion.deflate(0.5);
+    final front = atlas.frontRegion;
+    final back = atlas.backRegion;
     if (front.width <= 0 || front.height <= 0) return null;
     if (back.width <= 0 || back.height <= 0) return null;
 
@@ -359,18 +359,16 @@ class PageCurlRenderer {
 
     if (!_isValidRegion(atlas.image, region)) return false;
 
-    // Bilinear sampling at the cell edge can otherwise pull neighbouring pixels
-    // across the two-face atlas gutter. In a single-face atlas no gutter exists,
-    // so avoid insetting to keep texels pixel-aligned on flat pages.
-    final inset = atlas.isSingleFace ? region : region.deflate(0.5);
-    if (inset.width <= 0 || inset.height <= 0) return false;
-
+    // Exact pixel coordinates are used for both single-face and two-face
+    // atlases. Deflating by 0.5 texels offsets UV sampling relative to
+    // screen pixels, which introduces diagonal bilinear interpolation seams
+    // across quad diagonals. The atlas already includes inter-cell gutters.
     final mirrorHorizontally = resolveMirrorHorizontally(
       direction: params.direction,
       showBack: showBack,
     );
 
-    mesh.updateTextureRegion(inset, mirrorHorizontally: mirrorHorizontally);
+    mesh.updateTextureRegion(region, mirrorHorizontally: mirrorHorizontally);
 
     return true;
   }
@@ -476,7 +474,7 @@ class PageCurlRenderer {
       TileMode.clamp,
       TileMode.clamp,
       Matrix4.identity().storage,
-      filterQuality: FilterQuality.medium,
+      filterQuality: FilterQuality.low,
     );
 
     _shader = shader;
@@ -540,7 +538,7 @@ class PageCurlRenderer {
 @immutable
 @internal
 class PageCurlLighting {
-  const PageCurlLighting({this.ambient = 0.72, this.foldDarkening = 0.04})
+  const PageCurlLighting({this.ambient = 0.60, this.foldDarkening = 0.10})
     : assert(ambient >= 0 && ambient <= 1),
       assert(foldDarkening >= 0);
 
@@ -567,11 +565,19 @@ class PageCurlLighting {
       // Two-sided paper: front and back both receive light according to their
       // absolute facing angle.
       final facing = nz.abs().clamp(0.0, 1.0);
+
+      // On flat portions of the sheet, ensure pure opaque white so no
+      // Gouraud shading gradients or Mach banding cross flat quads.
+      if (facing >= 0.999) {
+        colors[i] = 0xFFFFFFFF;
+        continue;
+      }
+
       final curl = 1.0 - facing;
 
       // Smooth diffuse paper lighting: preserves clean off-white book paper
-      // while providing gentle, natural 3D curvature shading without dark creases.
-      final diffuse = math.pow(facing, 0.7).toDouble();
+      // while providing tangible, natural 3D curvature shading without dark creases.
+      final diffuse = math.pow(facing, 0.75).toDouble();
       var luminance = ambient + (1.0 - ambient) * diffuse;
       luminance -= foldDarkening * curl * curl;
 
@@ -615,7 +621,7 @@ class PageCurlLighting {
 /// benchmarked or disabled without changing the curl renderer.
 @internal
 class PageCurlShadow {
-  const PageCurlShadow({this.opacity = 0.32, this.blurSigma = 12.0})
+  const PageCurlShadow({this.opacity = 0.40, this.blurSigma = 12.0})
     : assert(opacity >= 0 && opacity <= 1),
       assert(blurSigma >= 0);
 
@@ -685,7 +691,7 @@ class PageCurlShadow {
     final ny = f.my;
     final sx = f.spineX + f.dir * (f.axisX + f.mx * f.radius);
     final sy = f.axisY + f.my * f.radius;
-    final width = f.leafWidth * 0.10 + f.radius * 0.8;
+    final width = f.leafWidth * 0.12 + f.radius * 0.85;
 
     final start = origin + Offset(sx, sy);
     final end = start + Offset(nx * width, ny * width);
@@ -715,24 +721,24 @@ class PageCurlShadow {
         gradEnd,
         [
           const Color(0x00000000),
-          Color.fromRGBO(0, 0, 0, alpha * 0.85),
-          Color.fromRGBO(0, 0, 0, alpha * 0.38),
-          Color.fromRGBO(0, 0, 0, alpha * 0.10),
+          Color.fromRGBO(0, 0, 0, alpha * 0.95),
+          Color.fromRGBO(0, 0, 0, alpha * 0.55),
+          Color.fromRGBO(0, 0, 0, alpha * 0.20),
           const Color(0x00000000),
         ],
-        [0.0, 0.24, 0.52, 0.78, 1.0],
+        [0.0, 0.20, 0.48, 0.75, 1.0],
       );
 
-    // Subtle contact ambient occlusion along the crease line:
+    // Visible contact ambient occlusion along the crease line:
     final creaseStart = origin + Offset(f.spineX + f.dir * f.axisX, f.axisY);
-    final aoWidth = (f.radius * 0.28).clamp(2.0, 10.0);
+    final aoWidth = (f.radius * 0.35).clamp(3.0, 14.0);
     final aoPaint = Paint()
       ..shader = ui.Gradient.linear(
         creaseStart - normal * (aoWidth * 0.5),
         creaseStart + normal * (aoWidth * 0.5),
         [
           const Color(0x00000000),
-          Color.fromRGBO(0, 0, 0, alpha * 0.40),
+          Color.fromRGBO(0, 0, 0, alpha * 0.65),
           const Color(0x00000000),
         ],
         [0.0, 0.5, 1.0],

@@ -33,6 +33,21 @@ class SheetAtlas {
     PageTexture? borrowedFrom,
   }) : _borrowedFrom = borrowedFrom;
 
+  @visibleForTesting
+  factory SheetAtlas.fromImage({
+    required ui.Image image,
+    required Rect frontRegion,
+    required Rect backRegion,
+    required Size logicalSize,
+    bool ownsImage = false,
+  }) => SheetAtlas._(
+    image: image,
+    frontRegion: frontRegion,
+    backRegion: backRegion,
+    logicalSize: logicalSize,
+    ownsImage: ownsImage,
+  );
+
   /// The texture whose image a single-face atlas borrows, if any.
   final PageTexture? _borrowedFrom;
 
