@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:paperflip/src/pages/page_texture.dart';
 import 'package:paperflip/src/rendering/curl_parameters.dart';
 import 'package:paperflip/src/rendering/page_curl_camera.dart';
 import 'package:paperflip/src/rendering/page_curl_geometry.dart';
@@ -172,32 +173,60 @@ void main() {
         final camera = PageCurlCamera.forPage(pageSize);
         final renderer = PageCurlRenderer();
 
-        // Create uniform ivory 800x1200 texture:
-        final rec = ui.PictureRecorder();
-        final c = Canvas(rec);
-        c.drawRect(
+        // 1. Create a genuine 800x1200 ivory texture (pixelRatio 2.0):
+        final frontRec = ui.PictureRecorder();
+        final frontCanvas = Canvas(frontRec);
+        frontCanvas.drawRect(
           const Rect.fromLTWH(0, 0, 800, 1200),
           Paint()..color = const Color(0xFFFBF0D9),
         );
-        final ivoryImg = rec.endRecording().toImageSync(800, 1200);
-
-        final atlas = SheetAtlas.fromImage(
-          image: ivoryImg,
-          frontRegion: const Rect.fromLTWH(0, 0, 800, 1200),
-          backRegion: const Rect.fromLTWH(802, 0, 800, 1200),
+        final frontImg = frontRec.endRecording().toImageSync(800, 1200);
+        final frontTexture = PageTexture(
+          image: frontImg,
           logicalSize: pageSize,
-          ownsImage: true,
         );
 
+        // 2. Create back texture (8x8 white stock):
+        final backRec = ui.PictureRecorder();
+        final backCanvas = Canvas(backRec);
+        backCanvas.drawRect(
+          const Rect.fromLTWH(0, 0, 8, 8),
+          Paint()..color = const Color(0xFFFFFFFF),
+        );
+        final backImg = backRec.endRecording().toImageSync(8, 8);
+        final backTexture = PageTexture(image: backImg, logicalSize: pageSize);
+
+        // 3. Pack using the production SheetAtlas.pack:
+        final atlas = await SheetAtlas.pack(
+          PageFaceSet(front: frontTexture, back: backTexture),
+        );
+
+        expect(atlas.isSingleFace, isFalse);
+        expect(atlas.image.width, 1602);
+        expect(atlas.image.height, 1200);
+        expect(atlas.frontRegion, const Rect.fromLTWH(0, 0, 800, 1200));
+        expect(atlas.backRegion, const Rect.fromLTWH(802, 0, 800, 1200));
+
+        // 4. Fill contrasting red background so a transparent/empty draw fails:
         final renderRec = ui.PictureRecorder();
         final renderCanvas = Canvas(renderRec);
+        renderCanvas.drawRect(
+          const Rect.fromLTWH(0, 0, 400, 600),
+          Paint()..color = const Color(0xFFFF0000), // Red background
+        );
 
-        renderer.paint(
+        // 5. Render stationary flat mesh:
+        final ok = renderer.paint(
           renderCanvas,
           mesh,
           CurlParameters.rest,
           atlas,
           camera: camera,
+        );
+        expect(
+          ok,
+          isTrue,
+          reason: 'renderer.paint must return true for valid atlas',
         );
 
         final renderedImg = renderRec.endRecording().toImageSync(400, 600);
@@ -207,22 +236,32 @@ void main() {
         expect(byteData, isNotNull);
         final pixels = byteData!.buffer.asUint32List();
 
-        // Target ivory color in RGBA: R:251, G:240, B:217, A:255
-        final firstColor = pixels[0];
-        var mismatchCount = 0;
-        for (var i = 0; i < pixels.length; i++) {
-          if (pixels[i] != firstColor) {
-            mismatchCount++;
+        // 6. Target ivory color in RGBA: R:251, G:240, B:217, A:255 (0xFFD9F0FB in little-endian uint32)
+        // Check interior of the page (inset by 4 pixels to separate from perimeter stroke):
+        const expectedColor = 0xFFD9F0FB;
+        var interiorMismatches = 0;
+        const width = 400;
+        const height = 600;
+
+        for (var y = 4; y < height - 4; y++) {
+          for (var x = 4; x < width - 4; x++) {
+            final px = pixels[y * width + x];
+            if (px != expectedColor) {
+              interiorMismatches++;
+            }
           }
         }
 
-        // Entire stationary page must be 100% uniform with zero crosshatch variation:
         expect(
-          mismatchCount,
+          interiorMismatches,
           0,
-          reason: 'Crosshatch seam artifact detected on stationary mesh',
+          reason:
+              'Crosshatch seam artifact or non-uniform pixels detected in page interior',
         );
 
+        frontTexture.dispose();
+        backTexture.dispose();
+        atlas.dispose();
         renderer.dispose();
       },
     );
